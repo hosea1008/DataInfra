@@ -25,10 +25,13 @@ import { renderPie } from "./charts.js";
 
 const TOP_K_OPTIONS = [5, 10, 12, 20];
 
+/** Default distribution column (falls back to the first column when absent). */
+const DEFAULT_COLUMN = "dataset_type";
+
 const state = {
   inited: false,
   columns: [],
-  column: "",
+  column: DEFAULT_COLUMN,
   weight: "rows",
   topK: 12,
 };
@@ -311,7 +314,9 @@ async function loadColumnsAndDist() {
       return;
     }
     if (!state.columns.some((c) => c.name === state.column)) {
-      state.column = state.columns[0].name;
+      state.column = state.columns.some((c) => c.name === DEFAULT_COLUMN)
+        ? DEFAULT_COLUMN
+        : state.columns[0].name;
     }
     const fresh = buildColumnSelect();
     fresh.value = state.column;
