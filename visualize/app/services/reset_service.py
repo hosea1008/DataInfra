@@ -38,6 +38,12 @@ MAX_COPY_ROWS_EST = 200_000
 META_TABLES = ("step_key", "version_info", "column_info")
 SAMPLED_TABLES = ("status", "lerobot_episode", "data")
 
+#: Production schemas declare lerobot_uuid columns as either ``uuid`` or
+#: ``text`` (and even mix the two across tables), while the service always
+#: handles uuids as Python strings. Every uuid comparison therefore casts the
+#: column with ``::text`` and every uuid SELECT returns ``::text`` so both
+#: column types (and their mixtures) behave identically.
+
 #: SpooledTemporaryFile rollover threshold for COPY payloads.
 _SPOOL_MAX_BYTES = 16 * 1024 * 1024
 
@@ -95,7 +101,7 @@ def build_plan(pools: PoolManager, req: ResetPlanRequest) -> ResetPlanResponse:
             raise ResetValidationError(f"unknown dataset_names: {', '.join(unknown)}")
 
         cur.execute(
-            "SELECT lerobot_uuid FROM status"
+            "SELECT lerobot_uuid::text FROM status"
             " WHERE dataset_name = ANY(%s) ORDER BY random() LIMIT %s",
             (req.dataset_names, req.n),
         )
@@ -125,7 +131,7 @@ def _estimate_volumes(cur: PgCursor, uuids: list[str]) -> ResetVolumes:
     """Row-volume estimate for the sampled uuids + full meta-table counts."""
     cur.execute(
         "SELECT count(*), coalesce(sum(episode_count), 0)"
-        " FROM lerobot_episode WHERE lerobot_uuid = ANY(%s)",
+        " FROM lerobot_episode WHERE lerobot_uuid::text = ANY(%s)",
         (uuids,),
     )
     le_rows, episode_est = cur.fetchone()
@@ -187,7 +193,8 @@ def _validate_execute(pcur: PgCursor, req: ResetExecuteRequest) -> None:
     if not req.lerobot_uuids:
         raise ResetValidationError("lerobot_uuids must be non-empty")
     pcur.execute(
-        "SELECT lerobot_uuid, dataset_name FROM status WHERE lerobot_uuid = ANY(%s)",
+        "SELECT lerobot_uuid::text, dataset_name FROM status"
+        " WHERE lerobot_uuid::text = ANY(%s)",
         (list(req.lerobot_uuids),),
     )
     found = dict(pcur.fetchall())
@@ -203,7 +210,7 @@ def _validate_execute(pcur: PgCursor, req: ResetExecuteRequest) -> None:
         )
     pcur.execute(
         "SELECT coalesce(sum(episode_count), 0)"
-        " FROM lerobot_episode WHERE lerobot_uuid = ANY(%s)",
+        " FROM lerobot_episode WHERE lerobot_uuid::text = ANY(%s)",
         (list(req.lerobot_uuids),),
     )
     episode_est = pcur.fetchone()[0]
@@ -258,7 +265,8 @@ def _copy_table(channels: _Cursors, table: str, uuids: list[str] | None) -> int:
     copy_out = f"COPY ({source}) TO STDOUT (FORMAT csv)"
     if uuids is not None:
         copy_out = pcur.mogrify(
-            f"COPY ({source} WHERE lerobot_uuid = ANY(%s)) TO STDOUT (FORMAT csv)",
+            f"COPY ({source} WHERE lerobot_uuid::text = ANY(%s))"
+            " TO STDOUT (FORMAT csv)",
             (uuids,),
         ).decode()
     with tempfile.SpooledTemporaryFile(max_size=_SPOOL_MAX_BYTES) as buf:

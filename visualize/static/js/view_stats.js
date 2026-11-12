@@ -54,10 +54,29 @@ function sampledBadge(pct) {
       class: "badge badge-approx",
       title:
         "data 表数据量较大，本结果按抽样统计估算（比例可靠，绝对值为估算）；" +
-        "点“刷新”可精确重算（扫描全表，较慢）",
+        "点“刷新”重新抽样，点“全量统计”可精确重算（扫描全表，较慢）",
     },
     `抽样估算${pctText}`
   );
+}
+
+/**
+ * Disable `buttons` for the duration of `work`, restoring labels afterwards.
+ * `work` flips one button's label to a progress text while running.
+ */
+async function runExclusive(buttons, work) {
+  const labels = buttons.map((b) => b.textContent);
+  buttons.forEach((b) => {
+    b.disabled = true;
+  });
+  try {
+    await work();
+  } finally {
+    buttons.forEach((b, i) => {
+      b.disabled = false;
+      b.textContent = labels[i];
+    });
+  }
 }
 
 /* ---------- dataset pies ---------- */
@@ -89,20 +108,22 @@ function toPieData(items) {
   }));
 }
 
-async function loadPies(refresh = false) {
-  // On a refresh keep the current pies visible while recomputing.
-  if (!refresh || !piesBox.firstChild) {
+async function loadPies(mode = null) {
+  // "sample"/"exact" keep the current pies visible while recomputing.
+  if (!mode || !piesBox.firstChild) {
     replaceChildren(
       piesBox,
       loadingBlock(
-        refresh
-          ? "正在精确统计（扫描 data 全表，可能需要数分钟）…"
-          : "加载数据集统计…"
+        mode === "exact"
+          ? "正在全量精确统计（扫描 data 全表，可能需要数分钟）…"
+          : mode === "sample"
+            ? "正在重新抽样统计…"
+            : "加载数据集统计…"
       )
     );
   }
   try {
-    const data = await api.statsDatasets(refresh);
+    const data = await api.statsDatasets(mode != null, mode === "exact");
     const specs = [
       {
         title: "lerobot 数",
@@ -313,24 +334,34 @@ export function activate(root) {
 
   columnSelect = el("select", { "aria-label": "统计列" });
 
-  const piesRefreshBtn = el(
+  const piesSampleBtn = el(
     "button",
     {
       class: "btn",
       type: "button",
-      title: "重新统计（时长饼图需扫描 data 全表，可能需要数分钟）",
-      onclick: async () => {
-        piesRefreshBtn.disabled = true;
-        piesRefreshBtn.textContent = "统计中…";
-        try {
-          await loadPies(true);
-        } finally {
-          piesRefreshBtn.disabled = false;
-          piesRefreshBtn.textContent = "刷新";
-        }
-      },
+      title: "重新抽样估算并更新缓存（较快；表较小时自动退化为精确统计）",
+      onclick: () =>
+        runExclusive([piesSampleBtn, piesExactBtn], async () => {
+          piesSampleBtn.textContent = "抽样中…";
+          await loadPies("sample");
+        }),
     },
     "刷新"
+  );
+
+  const piesExactBtn = el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      title: "全量精确统计并更新缓存（需扫描 data 全表，可能需要数分钟）",
+      onclick: () =>
+        runExclusive([piesSampleBtn, piesExactBtn], async () => {
+          piesExactBtn.textContent = "全量统计中…";
+          await loadPies("exact");
+        }),
+    },
+    "全量统计"
   );
 
   const weightToggle = segToggle(
@@ -361,34 +392,61 @@ export function activate(root) {
     })
   );
 
-  const refreshBtn = el(
+  const distSampleBtn = el(
     "button",
     {
       class: "btn",
       type: "button",
-      title: "精确重算本列分布（扫描 data 全表，可能需要数分钟）",
-      onclick: async () => {
-        refreshBtn.disabled = true;
-        refreshBtn.textContent = "精确统计中…";
-        let err = null;
-        try {
-          await api.columnDistribution({
-            column: state.column,
-            weight: state.weight,
-            topK: state.topK,
-            refresh: true,
-          });
-        } catch (e) {
-          err = e;
-        }
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = "刷新";
-        loadDistribution(
-          err ? `精确统计失败：${err.message}（以下为缓存结果）` : null
-        );
-      },
+      title: "重新抽样估算本列并更新缓存（较快；表较小时自动退化为精确统计）",
+      onclick: () =>
+        runExclusive([distSampleBtn, distExactBtn], async () => {
+          distSampleBtn.textContent = "抽样中…";
+          let err = null;
+          try {
+            await api.columnDistribution({
+              column: state.column,
+              weight: state.weight,
+              topK: state.topK,
+              refresh: true,
+            });
+          } catch (e) {
+            err = e;
+          }
+          loadDistribution(
+            err ? `重新抽样失败：${err.message}（以下为缓存结果）` : null
+          );
+        }),
     },
     "刷新"
+  );
+
+  const distExactBtn = el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      title: "全量精确统计本列并更新缓存（需扫描 data 全表，可能需要数分钟）",
+      onclick: () =>
+        runExclusive([distSampleBtn, distExactBtn], async () => {
+          distExactBtn.textContent = "全量统计中…";
+          let err = null;
+          try {
+            await api.columnDistribution({
+              column: state.column,
+              weight: state.weight,
+              topK: state.topK,
+              refresh: true,
+              exact: true,
+            });
+          } catch (e) {
+            err = e;
+          }
+          loadDistribution(
+            err ? `全量统计失败：${err.message}（以下为缓存结果）` : null
+          );
+        }),
+    },
+    "全量统计"
   );
 
   replaceChildren(
@@ -400,7 +458,12 @@ export function activate(root) {
         "div",
         { class: "stats-card-head" },
         el("h3", { class: "card-title" }, "数据集统计（生产库）"),
-        piesRefreshBtn
+        el(
+          "div",
+          { class: "btn-group" },
+          piesSampleBtn,
+          piesExactBtn
+        )
       ),
       piesMeta,
       piesBox
@@ -418,7 +481,8 @@ export function activate(root) {
         weightToggle.element,
         el("span", { class: "control-label" }, "Top K："),
         topKSelect,
-        refreshBtn
+        distSampleBtn,
+        distExactBtn
       ),
       distBox,
       distMeta

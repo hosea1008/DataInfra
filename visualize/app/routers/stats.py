@@ -5,10 +5,10 @@ Routes (mounted by app.main auto-include):
 - GET /api/stats/columns                                     -> ColumnListResponse
 - GET /api/stats/column-distribution?column=X&weight=...     -> ColumnDistResponse
 
-All SQL lives in app.services.stats_service behind a 600 s TTL cache;
-``refresh=1`` on the cached endpoints recomputes with a full exact scan and
-repopulates the entry (column distributions otherwise sample huge ``data``
-tables via TABLESAMPLE — see that module for the strategy).
+All SQL lives in app.services.stats_service behind a 600 s TTL cache.
+Recompute modes: ``refresh=1`` recomputes now (re-sampling big tables, the
+fast "刷新" path); ``exact=1`` recomputes with a full unsampled scan (implies
+refresh, the slow "全量统计" path).
 """
 
 from typing import Literal
@@ -23,10 +23,15 @@ router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
 @router.get("/datasets", response_model=DatasetStatsResponse)
-def dataset_stats(request: Request, refresh: bool = False) -> DatasetStatsResponse:
-    """Per-dataset pies: lerobot count, episode count, total hours."""
+def dataset_stats(
+    request: Request, refresh: bool = False, exact: bool = False
+) -> DatasetStatsResponse:
+    """Per-dataset pies: lerobot count, episode count, total hours.
+
+    ``refresh=1`` re-samples and replaces the cache; ``exact=1`` runs a full
+    unsampled scan (implies refresh)."""
     pools: PoolManager = request.app.state.pools
-    return stats_service.get_dataset_stats(pools, refresh=refresh)
+    return stats_service.get_dataset_stats(pools, refresh=refresh, exact=exact)
 
 
 @router.get("/columns", response_model=ColumnListResponse)
@@ -43,17 +48,25 @@ def column_distribution(
     weight: Literal["rows", "hours"] = "rows",
     top_k: int = Query(default=12, ge=1, le=100),
     refresh: bool = False,
+    exact: bool = False,
 ) -> ColumnDistResponse:
     """Value distribution of one whitelisted ``data`` column.
 
     ``column`` must be a live column of table ``data`` (400 otherwise, which
     also rejects injection attempts); ``weight`` selects the measure used to
-    order buckets (rows|hours, 422 otherwise).
+    order buckets (rows|hours, 422 otherwise). ``refresh=1`` recomputes now
+    (sampled on big tables); ``exact=1`` recomputes exactly and implies
+    refresh.
     """
     pools: PoolManager = request.app.state.pools
     try:
         return stats_service.get_column_distribution(
-            pools, column=column, weight=weight, top_k=top_k, refresh=refresh
+            pools,
+            column=column,
+            weight=weight,
+            top_k=top_k,
+            refresh=refresh,
+            exact=exact,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

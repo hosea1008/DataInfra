@@ -21,8 +21,13 @@ GROUP BY can run for minutes. When pg_class estimates it above
 ``TABLESAMPLE SYSTEM (pct)`` targeting ~``SAMPLE_TARGET_ROWS`` sampled rows and
 the row/hour counts are scaled back up (1/pct); ratios are unaffected. The
 response is flagged ``sampled``/``sample_pct`` so the UI can label estimates.
-``refresh=1`` always recomputes with a full exact scan and repopulates the
-cache; ``cached_at`` is the moment the payload was computed (and stored).
+
+Recompute modes (both endpoints):
+- ``refresh=True`` (the "刷新" button): recompute NOW with sampling, replacing
+  the cached entry with a fresh (re-drawn) estimate.
+- ``exact=True`` (the "全量统计" button, implies refresh): recompute NOW with a
+  full exact scan, replacing the cached entry with exact numbers.
+``cached_at`` is the moment the payload was computed (and stored).
 """
 
 import re
@@ -219,22 +224,26 @@ def _compute_dataset_stats(pools: PoolManager, *, exact: bool) -> DatasetStatsRe
     )
 
 
-def get_dataset_stats(pools: PoolManager, refresh: bool = False) -> DatasetStatsResponse:
+def get_dataset_stats(
+    pools: PoolManager, refresh: bool = False, exact: bool = False
+) -> DatasetStatsResponse:
     """Per-dataset pies: lerobot count (status), episode count (lerobot_episode),
     total hours (data.origin_video_duration_s / 3600, sampled on big tables).
 
-    ``refresh=True`` forces a fresh, unsampled (exact) recomputation."""
+    ``refresh=True`` recomputes now (sampled on big tables); ``exact=True``
+    recomputes with a full unsampled scan and implies refresh."""
     key = ("datasets",)
-    if not refresh:
+    recompute = refresh or exact
+    if not recompute:
         cached = _CACHE.get(key)
         if cached is not None:
             return cached
     with _singleflight(key):
-        if not refresh:
+        if not recompute:
             cached = _CACHE.get(key)
             if cached is not None:
                 return cached
-        response = _compute_dataset_stats(pools, exact=refresh)
+        response = _compute_dataset_stats(pools, exact=exact)
         _CACHE.set(key, response)
         return response
 
@@ -334,6 +343,7 @@ def get_column_distribution(
     weight: str,
     top_k: int,
     refresh: bool = False,
+    exact: bool = False,
 ) -> ColumnDistResponse:
     """Duration-aware value distribution of one whitelisted ``data`` column.
 
@@ -344,16 +354,18 @@ def get_column_distribution(
 
     The expensive part (the full/sample aggregation) is cached per column;
     weight/top_k only affect the cheap Python-side slicing, so switching them
-    re-runs no SQL. ``refresh=True`` recomputes exactly (full table scan).
+    re-runs no SQL. ``refresh=True`` recomputes now (sampled on big tables);
+    ``exact=True`` recomputes with a full unsampled scan and implies refresh.
     """
     validate_identifier(column)
     key = ("column_dist", column)
-    entry = None if refresh else _CACHE.get(key)
+    recompute = refresh or exact
+    entry = None if recompute else _CACHE.get(key)
     if entry is None:
         with _singleflight(key):
-            entry = None if refresh else _CACHE.get(key)
+            entry = None if recompute else _CACHE.get(key)
             if entry is None:
-                entry = _compute_dist_buckets(pools, column, exact=refresh)
+                entry = _compute_dist_buckets(pools, column, exact=exact)
                 _CACHE.set(key, entry)
 
     buckets = sorted(entry["buckets"], key=lambda bucket: bucket[weight], reverse=True)

@@ -77,18 +77,39 @@ export const api = {
         qs({ keys: Array.isArray(keys) && keys.length ? keys.join(",") : undefined })
     ),
 
-  /** GET /api/stats/datasets?refresh=0|1 (production only) */
-  statsDatasets: (refresh = false) =>
-    request("/api/stats/datasets" + qs({ refresh: refresh ? 1 : 0 })),
+  /**
+   * GET /api/stats/datasets?refresh=0|1&exact=0|1 (production only).
+   * refresh=1: recompute now (re-sampling big tables).
+   * exact=1: full unsampled recompute (implies refresh).
+   */
+  statsDatasets: (refresh = false, exact = false) =>
+    request(
+      "/api/stats/datasets" +
+        qs({ refresh: refresh ? 1 : 0, exact: exact ? 1 : 0 })
+    ),
 
   /** GET /api/stats/columns -> {columns:[{name,kind,note}]} */
   statsColumns: () => request("/api/stats/columns"),
 
-  /** GET /api/stats/column-distribution */
-  columnDistribution: ({ column, weight = "rows", topK = 12, refresh = false }) =>
+  /**
+   * GET /api/stats/column-distribution (refresh/exact as in statsDatasets).
+   */
+  columnDistribution: ({
+    column,
+    weight = "rows",
+    topK = 12,
+    refresh = false,
+    exact = false,
+  }) =>
     request(
       "/api/stats/column-distribution" +
-        qs({ column, weight, top_k: topK, refresh: refresh ? 1 : 0 })
+        qs({
+          column,
+          weight,
+          top_k: topK,
+          refresh: refresh ? 1 : 0,
+          exact: exact ? 1 : 0,
+        })
     ),
 
   /** GET /api/reset/datasets -> {datasets:[{dataset_name,lerobot_count}], default_n} */

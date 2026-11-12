@@ -9,7 +9,7 @@
 设计里的数据管线有多个表格，以下是这些表及其列
 
 status表: 每行是一个lerobot，大部分的列是BOOL值，表征该lerobot的某个处理是否完成
-    lerobot_uuid
+    lerobot_uuid 类型是UUID，数据库里所有UUID列的类型都是UUID不是TEXT
     create_time
     dataset_name 数据集名，多个lerobot会同属一个数据集
     lerobot_path

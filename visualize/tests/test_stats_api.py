@@ -278,13 +278,23 @@ def test_distribution_samples_big_tables_with_scaled_counts(client, monkeypatch)
     for value, bucket in expected.items():
         assert items[value]["rows"] == bucket["rows"]
 
-    # refresh=1 forces an exact (unsampled) full-scan recomputation
-    refreshed = client.get(
+    # refresh=1 recomputes with a fresh (re-drawn) sample: still sampled
+    resampled = client.get(
         DIST_URL, params={"column": "has_wrist_cam", "refresh": 1}
+    ).json()
+    assert resampled["sampled"] is True
+    assert resampled["sample_pct"] == 100.0
+
+    # exact=1 recomputes with a full unsampled scan
+    refreshed = client.get(
+        DIST_URL, params={"column": "has_wrist_cam", "exact": 1}
     ).json()
     assert refreshed["sampled"] is False
     assert refreshed["sample_pct"] is None
     assert refreshed["total_rows"] == 500
+    # the exact result replaced the cached sample
+    after = client.get(DIST_URL, params={"column": "has_wrist_cam"}).json()
+    assert after["sampled"] is False
 
 
 def test_dataset_stats_hours_sampled_on_big_tables(client, monkeypatch):
@@ -300,3 +310,9 @@ def test_dataset_stats_hours_sampled_on_big_tables(client, monkeypatch):
     assert body["totals"]["lerobots"] == 50
     assert body["totals"]["episodes"] == 500
     assert body["totals"]["hours"] == pytest.approx(TOTAL_DURATION_S / 3600)
+
+    # exact=1 recomputes everything with a full unsampled scan
+    exact = client.get(DATASET_URL, params={"exact": 1}).json()
+    assert exact["sampled"] is False
+    assert exact["sample_pct"] is None
+    assert exact["totals"]["hours"] == pytest.approx(TOTAL_DURATION_S / 3600)

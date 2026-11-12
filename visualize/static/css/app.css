@@ -106,7 +106,7 @@ html, body {
   padding: 0 var(--space-5);
   display: flex;
   gap: var(--space-1);
-  overflow-x: auto;
+  flex-wrap: wrap;
 }
 
 .tab-btn {
@@ -237,6 +237,8 @@ html, body {
   padding: var(--space-1) var(--space-2);
 }
 .btn-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+
+.btn-group { display: inline-flex; align-items: center; gap: var(--space-2); }
 
 select, input[type="number"] {
   border: 1px solid var(--border-strong);
