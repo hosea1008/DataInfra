@@ -317,7 +317,7 @@ def build_version_progress(
                 key=key,
                 step_key=info.step_key,
                 version_no=info.version_no,
-                count=count,
+                count=None if is_version else count,
                 completed_hours=completed_hours,
                 total_hours=total_hours,
                 progress_kind="hours" if is_version else "count",

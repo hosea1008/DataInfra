@@ -69,7 +69,7 @@ def test_progress_production_items_unpivoted(client):
     items = _by_key(response.json()["items"])
     assert set(items) == set(EXPECTED_COUNTS)
     for key, count in EXPECTED_COUNTS.items():
-        assert items[key]["count"] == count
+        assert items[key]["count"] == (None if key.startswith("s_") else count)
     for key, ratio in EXPECTED_RATIOS.items():
         assert items[key]["ratio"] == ratio
 
@@ -102,10 +102,10 @@ def test_progress_keys_filter(client):
     assert len(body["available"]) == 5
     items = _by_key(body["items"])
     assert set(items) == {"s_step_a_v_2", "s_step_b_v_1"}
-    assert items["s_step_a_v_2"]["count"] == 11
+    assert items["s_step_a_v_2"]["count"] is None
     assert items["s_step_a_v_2"]["completed_hours"] is not None
     assert items["s_step_a_v_2"]["version_note"] == "v2：打分算法升级"
-    assert items["s_step_b_v_1"]["count"] == 10
+    assert items["s_step_b_v_1"]["count"] is None
     assert items["s_step_b_v_1"]["completed_hours"] is not None
     assert items["s_step_b_v_1"]["step_explain"] == "示例步骤B：语义打标"
     assert items["s_step_b_v_1"]["version_note"] == "v1：初版打标"
