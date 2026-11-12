@@ -108,3 +108,41 @@ def test_three_table_update_and_stale_status_rollback(tmp_path):
         with conn.cursor() as cur:
             cur.execute("SELECT lerobot_path FROM lerobot_episode")
             assert cur.fetchone()[0] == str(new)
+
+
+def test_convert_path_changes_only_when_it_matches_old_row_path(tmp_path):
+    old, new = _pair(tmp_path)
+    uuid, unrelated_uuid = str(uuid4()), str(uuid4())
+    convert_column = migrate.CONVERT_PATH_COLUMN
+    with psycopg2.connect(**get_conn_params("test")) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TEMP TABLE status (lerobot_uuid uuid, lerobot_path text)")
+            cur.execute("CREATE TEMP TABLE lerobot_episode (lerobot_uuid uuid, lerobot_path text)")
+            cur.execute(f"CREATE TEMP TABLE data (id int, lerobot_uuid uuid, lerobot_path text, {convert_column} text)")
+            cur.execute("SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()")
+            schema = cur.fetchone()[0]
+            cur.execute("INSERT INTO status VALUES (%s::uuid, %s)", (uuid, str(old)))
+            cur.execute("INSERT INTO lerobot_episode VALUES (%s::uuid, %s)", (uuid, str(old)))
+            rows = [
+                (1, uuid, str(old), str(old)),
+                (2, uuid, str(old), "manual-path"),
+                (3, uuid, str(old), None),
+                (4, uuid, str(new), str(old)),
+                (5, unrelated_uuid, str(old), str(old)),
+            ]
+            for row_id, row_uuid, path, converted in rows:
+                cur.execute(f"INSERT INTO data VALUES (%s, %s::uuid, %s, %s)",
+                            (row_id, row_uuid, path, converted))
+            candidates = migrate.find_candidates(cur, schema)
+        assert migrate.apply_updates(conn, candidates, schema) == {
+            "status": 1, "lerobot_episode": 1, "data": 3,
+        }
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id, lerobot_path, {convert_column} FROM data ORDER BY id")
+            assert cur.fetchall() == [
+                (1, str(new), str(new)),
+                (2, str(new), "manual-path"),
+                (3, str(new), None),
+                (4, str(new), str(old)),
+                (5, str(old), str(old)),
+            ]

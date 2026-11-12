@@ -30,6 +30,7 @@ from psycopg2.extras import execute_values
 OLD_PREFIX = "/efs-mi-east4-hpc/"
 NEW_PREFIX = "/efs-mi-east4-4/"
 TABLES = ("status", "lerobot_episode", "data")
+CONVERT_PATH_COLUMN = "s_convert_55d_v_v1_c_lerobot_path"
 DEFAULT_DBINFO = Path(__file__).resolve().parents[1] / "DBInfo.json"
 DEFAULT_WORKERS = 4
 MAX_WARNINGS_SHOWN = 20
@@ -203,6 +204,18 @@ def _uuid_type(cur, table: str, schema: str) -> str:
     return "uuid" if row[0] else "text"
 
 
+def _has_column(cur, schema: str, table: str, column: str) -> bool:
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s "
+        "AND a.attnum > 0 AND NOT a.attisdropped)",
+        (schema, table, column),
+    )
+    return bool(cur.fetchone()[0])
+
+
 def apply_updates(
     conn, candidates: list[Candidate], schema: str = "public",
     progress: Callable[[str, int | None], None] | None = None,
@@ -230,6 +243,10 @@ def apply_updates(
             )
             cur.execute("ANALYZE efs_path_replacements")
             column_types = {table: _uuid_type(cur, table, schema) for table in TABLES}
+            has_convert_path = _has_column(cur, schema, "data", CONVERT_PATH_COLUMN)
+            if not has_convert_path:
+                print(f"WARNING: data.{CONVERT_PATH_COLUMN} is absent; updating lerobot_path only.",
+                      file=sys.stderr)
 
             status_match = sql.SQL("s.lerobot_uuid = r.uuid_text{}")
             status_cast = sql.SQL("::uuid") if column_types["status"] == "uuid" else sql.SQL("")
@@ -250,12 +267,19 @@ def apply_updates(
                     progress(table, None)
                 cast = sql.SQL("::uuid") if column_types[table] == "uuid" else sql.SQL("")
                 extra = sql.SQL(" AND t.lerobot_path = r.old_path") if table == "status" else sql.SQL("")
+                convert_set = sql.SQL("")
+                if table == "data" and has_convert_path:
+                    column = sql.Identifier(CONVERT_PATH_COLUMN)
+                    convert_set = sql.SQL(", {} = CASE WHEN t.{} = t.lerobot_path "
+                                          "THEN r.new_path ELSE t.{} END").format(
+                        column, column, column
+                    )
                 cur.execute(
-                    sql.SQL("UPDATE {}.{} AS t SET lerobot_path = r.new_path "
+                    sql.SQL("UPDATE {}.{} AS t SET lerobot_path = r.new_path{} "
                             "FROM efs_path_replacements AS r "
                             "WHERE t.lerobot_uuid = r.uuid_text{}{} "
                             "AND t.lerobot_path IS DISTINCT FROM r.new_path")
-                    .format(sql.Identifier(schema), sql.Identifier(table), cast, extra)
+                    .format(sql.Identifier(schema), sql.Identifier(table), convert_set, cast, extra)
                 )
                 changed[table] = cur.rowcount
                 if progress:
@@ -294,11 +318,18 @@ def diagnose_data(cur) -> None:
     print(f"data indexes ({len(indexes)}):")
     for name, definition in indexes:
         print(f"  {name}: {definition}")
+    cur.execute("SELECT to_regclass('pg_catalog.pg_stat_wal')")
+    if cur.fetchone()[0] is not None:
+        cur.execute("SELECT wal_bytes, wal_buffers_full FROM pg_stat_wal")
+        wal_bytes, buffers_full = cur.fetchone()
+        print(f"cluster WAL generated since stats reset: {int(wal_bytes):,} bytes; "
+              f"WAL buffer-full events: {buffers_full:,}")
     cur.execute(
         "SELECT pid, state, wait_event_type, wait_event, "
         "date_trunc('second', now() - query_start), pg_blocking_pids(pid) "
         "FROM pg_stat_activity WHERE datname = current_database() "
-        "AND pid <> pg_backend_pid() AND query ILIKE '%UPDATE%data%' "
+        "AND pid <> pg_backend_pid() AND state = 'active' "
+        "AND query ILIKE '%UPDATE%data%' "
         "ORDER BY query_start DESC LIMIT 10"
     )
     for pid, state, wait_type, wait_event, elapsed, blockers in cur.fetchall():
