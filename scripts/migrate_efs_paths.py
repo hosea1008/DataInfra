@@ -264,7 +264,7 @@ def apply_updates(
                 raise VerificationError("status update count mismatch; transaction rolled back")
         conn.commit()
         return changed
-    except Exception:
+    except BaseException:
         conn.rollback()
         raise
 
@@ -276,6 +276,36 @@ def connection_params(dbinfo_path: Path) -> dict:
     return {key: section[key] for key in ("host", "port", "dbname", "user", "password")}
 
 
+def diagnose_data(cur) -> None:
+    """Read-only facts needed to choose a safe update strategy on a real DB."""
+    cur.execute(
+        "SELECT pg_size_pretty(pg_relation_size(c.oid)), c.reltuples::bigint "
+        "FROM pg_class c WHERE c.oid = to_regclass('public.data')"
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise VerificationError("public.data does not exist")
+    print(f"data heap size: {row[0]}; estimated rows: {row[1]:,}")
+    cur.execute(
+        "SELECT i.indexname, i.indexdef FROM pg_indexes i "
+        "WHERE i.schemaname = 'public' AND i.tablename = 'data' ORDER BY i.indexname"
+    )
+    indexes = cur.fetchall()
+    print(f"data indexes ({len(indexes)}):")
+    for name, definition in indexes:
+        print(f"  {name}: {definition}")
+    cur.execute(
+        "SELECT pid, state, wait_event_type, wait_event, "
+        "date_trunc('second', now() - query_start), pg_blocking_pids(pid) "
+        "FROM pg_stat_activity WHERE datname = current_database() "
+        "AND pid <> pg_backend_pid() AND query ILIKE '%UPDATE%data%' "
+        "ORDER BY query_start DESC LIMIT 10"
+    )
+    for pid, state, wait_type, wait_event, elapsed, blockers in cur.fetchall():
+        print(f"active data UPDATE: pid={pid}, state={state}, elapsed={elapsed}, "
+              f"wait={wait_type or '-'}:{wait_event or '-'}, blockers={blockers}")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify and migrate EFS lerobot paths in production.",
@@ -285,6 +315,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--dbinfo", type=Path, default=Path(os.environ.get("VISUALIZE_DBINFO", DEFAULT_DBINFO)))
     parser.add_argument("--apply", action="store_true", help="write the verified changes in one transaction")
+    parser.add_argument("--diagnose", action="store_true", help="show data table indexes and active update waits; read-only")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, choices=range(1, 17),
                         metavar="1-16", help=f"parallel directory checks (default: {DEFAULT_WORKERS})")
     parser.add_argument("--report", type=Path, help="write every UUID and verification result to a CSV file")
@@ -294,6 +325,10 @@ def main(argv=None) -> int:
         conn = psycopg2.connect(**params)
         try:
             conn.autocommit = True  # don't hold a DB transaction during filesystem comparison
+            if args.diagnose:
+                with conn.cursor() as cur:
+                    diagnose_data(cur)
+                return 0
             with conn.cursor() as cur:
                 candidates = find_candidates(cur)
             unique_paths = len({(item.old_path, item.new_path) for item in candidates})
@@ -334,6 +369,9 @@ def main(argv=None) -> int:
     except (OSError, KeyError, ValueError, psycopg2.Error, VerificationError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Interrupted; uncommitted database changes will be rolled back.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
