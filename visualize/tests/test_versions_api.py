@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2.extras import DictCursor
 
 from app.config import get_conn_params
+from app.services import version_service
 from app.services.version_service import _compute_durations
 
 MANIFEST = json.loads((Path(__file__).resolve().parents[1] / "scripts/seed_manifest.json").read_text())
@@ -167,3 +168,54 @@ def test_exact_duration_cache_and_refresh(client):
     refreshed = client.get(PROD_URL, params={"refresh": 1}).json()
     assert refreshed["cached_at"] >= first["cached_at"]
     assert refreshed["items"][2]["completed_hours"] == first["items"][2]["completed_hours"]
+
+
+def test_text_version_number_uses_version_metadata_and_hours(monkeypatch):
+    """A real SQL aggregation with text version_no and nonnumeric version_key."""
+    class TempPool:
+        @contextmanager
+        def cursor(self, env, dict_cursor=False):
+            assert env == "isolated"
+            with connection.cursor(cursor_factory=DictCursor if dict_cursor else None) as cur:
+                yield cur
+
+    table_columns = {
+        "status_statistic": ["download_finish", "s_quality_v_release-a", "s_missing_v_alpha"],
+        "version_info": ["version_key", "step_key", "version_no", "version_note", "created_data_columns"],
+        "column_info": ["column_key"],
+        "step_key": ["step_key", "step_explain"],
+        "data": ["origin_video_duration_s", "s_quality_v_release-a_c_score", "s_quality_v_release-a_c_label"],
+    }
+    monkeypatch.setattr(version_service, "fetch_table_columns", lambda cur, table: table_columns.get(table, []))
+
+    with psycopg2.connect(**get_conn_params("test")) as connection:
+        with connection.cursor() as cur:
+            cur.execute('CREATE TEMP TABLE status_statistic (download_finish int, "s_quality_v_release-a" int, s_missing_v_alpha int)')
+            cur.execute('INSERT INTO status_statistic VALUES (1, 1, 1)')
+            cur.execute('CREATE TEMP TABLE status (id int)')
+            cur.execute('INSERT INTO status VALUES (1)')
+            cur.execute('CREATE TEMP TABLE step_key (step_key text, step_explain text)')
+            cur.execute("INSERT INTO step_key VALUES ('quality', 'quality step')")
+            cur.execute('CREATE TEMP TABLE version_info (version_key text, step_key text, version_no text, version_note text, created_data_columns text)')
+            cur.execute("INSERT INTO version_info VALUES ('s_quality_v_release-a', 'quality', 'release-a', 'text version', '[score, label]')")
+            cur.execute('CREATE TEMP TABLE column_info (column_key text)')
+            cur.execute("INSERT INTO column_info VALUES ('s_quality_v_release-a_c_score')")
+            cur.execute('CREATE TEMP TABLE data (origin_video_duration_s numeric, "s_quality_v_release-a_c_score" numeric, "s_quality_v_release-a_c_label" text)')
+            cur.execute("INSERT INTO data VALUES (3600, 1, NULL), (7200, NULL, 'done'), (10800, 2, 'done'), (14400, NULL, NULL)")
+        body = version_service.build_version_progress(TempPool(), "isolated", None, refresh=True)
+        selected = version_service.build_version_progress(TempPool(), "isolated", "s_quality_v_release-a")
+
+    items = {item.key: item for item in body.items}
+    item = items["s_quality_v_release-a"]
+    assert (item.step_key, item.version_no, item.version_note) == ("quality", "release-a", "text version")
+    assert item.progress_kind == "hours"
+    assert item.count is None
+    assert item.completed_hours == 6
+    assert item.total_hours == 10
+    assert item.ratio == 0.6
+    assert [entry.key for entry in selected.items] == ["s_quality_v_release-a"]
+    missing = items["s_missing_v_alpha"]
+    assert missing.progress_kind == "hours"
+    assert missing.count is None
+    assert missing.completed_hours is None
+    assert missing.ratio is None

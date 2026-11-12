@@ -6,7 +6,6 @@ duration (any one column populated); the result is cached for ten minutes and
 can be manually refreshed. Filtering the visible keys reuses that same scan.
 """
 
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -16,16 +15,13 @@ from psycopg2 import sql
 
 from app.db import PoolManager
 from app.schemas import VersionKeyInfo, VersionProgressItem, VersionProgressResponse
-from app.sqlutil import fetch_table_columns, qident, validate_identifier
+from app.sqlutil import fetch_table_columns
 from app.services.stats_service import TTLCache, _singleflight
 
 STATISTIC_TABLE = "status_statistic"
 STATUS_TABLE = "status"
 STEP_KEY_TABLE = "step_key"
 VERSION_INFO_TABLE = "version_info"
-
-#: s_<step_key>_v_<version_no> statistic column pattern.
-VERSION_KEY_RE = re.compile(r"^s_(.+)_v_(\d+)$")
 
 TOTAL_CACHE_TTL_S = 60.0
 
@@ -91,27 +87,51 @@ _total_lerobots_cache = _TtlCache(TOTAL_CACHE_TTL_S)
 _duration_cache = TTLCache()
 
 
-def _version_columns(cur, version_keys: list[str]) -> dict[str, list[str]]:
-    """Use version metadata, keeping only live data columns for safe SQL."""
+def _fetch_versions(cur, version_keys: list[str]) -> dict[str, dict]:
+    """Look up version metadata by its complete key, without parsing version_no."""
     if not version_keys:
         return {}
-    if not fetch_table_columns(cur, VERSION_INFO_TABLE) or not fetch_table_columns(cur, "column_info"):
-        return {key: [] for key in version_keys}
+    if not fetch_table_columns(cur, VERSION_INFO_TABLE):
+        return {}
     cur.execute(
-        "SELECT v.version_key, c.column_key FROM version_info v "
-        "LEFT JOIN column_info c ON c.step_key = v.step_key "
-        "AND c.version_no = v.version_no "
-        "WHERE v.version_key = ANY(%s)", (version_keys,)
+        "SELECT version_key, step_key, version_no, version_note, "
+        "created_data_columns FROM version_info WHERE version_key = ANY(%s)",
+        (version_keys,),
     )
-    metadata_rows = cur.fetchall()
-    live = set(fetch_table_columns(cur, "data"))
+    return {row["version_key"]: dict(row) for row in cur.fetchall()}
+
+
+def _created_column_names(raw) -> list[str]:
+    """Accept array/JSON-like or the documented '[aaa, bbb]' text format."""
+    if isinstance(raw, (list, tuple)):
+        parts = raw
+    elif isinstance(raw, str):
+        parts = raw.strip().strip("[]").split(",")
+    else:
+        return []
+    return [str(part).strip().strip("'\"") for part in parts if str(part).strip().strip("'\"")]
+
+
+def _version_columns(cur, version_keys: list[str], versions: dict[str, dict]) -> dict[str, list[str]]:
+    """Resolve real data columns from version_info and column_info metadata."""
     result = {key: [] for key in version_keys}
-    for row in metadata_rows:
-        key, column = row["version_key"], row["column_key"]
-        # The prefix also guards against inconsistent version/column metadata.
-        if column in live and column.startswith(key + "_c_"):
-            result[key].append(column)
-    return {key: sorted(set(columns)) for key, columns in result.items()}
+    if not versions:
+        return result
+    live = set(fetch_table_columns(cur, "data"))
+    info_keys = []
+    if fetch_table_columns(cur, "column_info"):
+        cur.execute("SELECT column_key FROM column_info")
+        info_keys = [row["column_key"] for row in cur.fetchall()]
+    for key in version_keys:
+        version = versions.get(key)
+        if version is None:
+            continue
+        prefix = key + "_c_"
+        candidates = {name for name in info_keys if isinstance(name, str) and name.startswith(prefix)}
+        for name in _created_column_names(version.get("created_data_columns")):
+            candidates.add(name if name.startswith(prefix) else prefix + name)
+        result[key] = sorted(name for name in candidates if name in live)
+    return result
 
 
 def _compute_durations(pools: PoolManager, env: str, columns: dict[str, list[str]]) -> dict:
@@ -122,8 +142,10 @@ def _compute_durations(pools: PoolManager, env: str, columns: dict[str, list[str
         for index, key in enumerate(keys):
             # OR short-circuits on the first populated column; one row is
             # counted once even when several version columns are populated.
+            # Every name was checked against live pg_catalog columns. Identifier
+            # quotes it safely even when a user-chosen version contains punctuation.
             condition = sql.SQL(" OR ").join(
-                sql.SQL("{} IS NOT NULL").format(qident(col)) for col in columns[key]
+                sql.SQL("{} IS NOT NULL").format(sql.Identifier(col)) for col in columns[key]
             )
             fields.append(sql.SQL("COALESCE(sum(origin_video_duration_s) FILTER (WHERE {}), 0) AS {}")
                           .format(condition, sql.Identifier(f"v{index}")))
@@ -164,20 +186,6 @@ def _parse_keys_filter(keys_csv: str | None) -> list[str] | None:
     return keys or None
 
 
-def _validate_identifiers(requested: list[str] | None) -> None:
-    """Reject requested keys that are not safe SQL identifiers (400)."""
-    if requested is None:
-        return
-    invalid = []
-    for key in requested:
-        try:
-            validate_identifier(key)
-        except ValueError:
-            invalid.append(key)
-    if invalid:
-        raise InvalidKeysError(invalid)
-
-
 def _check_known(requested: list[str], available: list[VersionKeyInfo]) -> None:
     """Reject requested keys that are not statistic columns (400)."""
     known = {info.key for info in available}
@@ -186,28 +194,29 @@ def _check_known(requested: list[str], available: list[VersionKeyInfo]) -> None:
         raise UnknownKeysError(unknown)
 
 
-def _build_available(columns: list[str]) -> list[VersionKeyInfo]:
-    """One VersionKeyInfo per statistic column, builtin keys first."""
+def _build_available(columns: list[str], versions: dict[str, dict]) -> list[VersionKeyInfo]:
+    """Treat every s_ key as a version; use version_info for its metadata."""
     infos = []
     for column in columns:
-        match = VERSION_KEY_RE.match(column)
-        if match:
+        if column.startswith("s_"):
+            version = versions.get(column, {})
             infos.append(
                 VersionKeyInfo(
                     key=column,
-                    step_key=match.group(1),
-                    version_no=int(match.group(2)),
+                    step_key=version.get("step_key"),
+                    version_no=version.get("version_no"),
                 )
             )
         else:
             infos.append(VersionKeyInfo(key=column))
-    # Builtin (unparsed) keys first; parsed keys by (step_key, version_no).
+    # Builtin keys first, then versions by metadata and complete key.
     # The sort is stable, so builtin keys keep their pg_catalog column order.
     infos.sort(
         key=lambda info: (
-            info.step_key is not None,
+            info.key.startswith("s_"),
             info.step_key or "",
-            info.version_no if info.version_no is not None else 0,
+            str(info.version_no) if info.version_no is not None else "",
+            info.key,
         )
     )
     return infos
@@ -222,17 +231,6 @@ def _fetch_step_explains(cur, step_keys: list[str]) -> dict[str, str | None]:
         (step_keys,),
     )
     return {row["step_key"]: row["step_explain"] for row in cur.fetchall()}
-
-
-def _fetch_version_notes(cur, version_keys: list[str]) -> dict[str, str | None]:
-    """Map version_key -> version_note (LEFT JOIN semantics via lookup)."""
-    if not version_keys:
-        return {}
-    cur.execute(
-        "SELECT version_key, version_note FROM version_info WHERE version_key = ANY(%s)",
-        (version_keys,),
-    )
-    return {row["version_key"]: row["version_note"] for row in cur.fetchall()}
 
 
 def _count_lerobots(pools: PoolManager, env: str) -> int:
@@ -252,7 +250,6 @@ def build_version_progress(
     router maps them to HTTP responses.
     """
     requested = _parse_keys_filter(keys_csv)
-    _validate_identifiers(requested)
 
     with pools.cursor(env, dict_cursor=True) as cur:
         columns = fetch_table_columns(cur, STATISTIC_TABLE)
@@ -265,7 +262,9 @@ def build_version_progress(
             raise StatusStatisticEmptyError(env)
         counts = dict(row)
 
-        available = _build_available(columns)
+        version_keys = [column for column in columns if column.startswith("s_")]
+        versions = _fetch_versions(cur, version_keys)
+        available = _build_available(columns, versions)
         if requested is not None:
             _check_known(requested, available)
         wanted = requested if requested is not None else [info.key for info in available]
@@ -281,13 +280,7 @@ def build_version_progress(
             if fetch_table_columns(cur, STEP_KEY_TABLE)
             else {}
         )
-        version_notes = (
-            _fetch_version_notes(cur, wanted)
-            if fetch_table_columns(cur, VERSION_INFO_TABLE)
-            else {}
-        )
-        version_keys = [info.key for info in available if info.step_key is not None]
-        columns_by_version = _version_columns(cur, version_keys)
+        columns_by_version = _version_columns(cur, version_keys, versions)
 
     durations = _get_durations(pools, env, columns_by_version, refresh=refresh) if version_keys else None
 
@@ -299,7 +292,7 @@ def build_version_progress(
     for key in wanted:
         info = infos[key]
         count = counts.get(key)
-        is_version = info.step_key is not None
+        is_version = key.startswith("s_")
         completed_hours = durations["hours"].get(key) if is_version and durations else None
         total_hours = durations["total_hours"] if is_version and durations else None
         if is_version and completed_hours is not None and total_hours is not None:
@@ -323,7 +316,7 @@ def build_version_progress(
                 progress_kind="hours" if is_version else "count",
                 ratio=ratio,
                 step_explain=step_explains.get(info.step_key),
-                version_note=version_notes.get(key),
+                version_note=versions.get(key, {}).get("version_note"),
             )
         )
 

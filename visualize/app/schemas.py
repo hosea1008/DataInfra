@@ -109,7 +109,7 @@ class ColumnDistResponse(BaseModel):
 class VersionProgressItem(BaseModel):
     key: str
     step_key: str | None = None
-    version_no: int | None = None
+    version_no: str | int | float | None = None
     count: int | None = None
     completed_hours: float | None = None
     total_hours: float | None = None
@@ -124,7 +124,7 @@ class VersionKeyInfo(BaseModel):
 
     key: str
     step_key: str | None = None
-    version_no: int | None = None
+    version_no: str | int | float | None = None
 
 
 class VersionProgressResponse(BaseModel):
