@@ -13,14 +13,19 @@ the file; only host/port/dbname are taken from the file. The test environment
 uses the file's user/password as-is.
 
 The DBInfo path is resolved in this order: explicit ``path`` argument, then the
-``VISUALIZE_DBINFO`` environment variable, then ``/root/DataInfra/DBInfo.json``.
+``VISUALIZE_DBINFO`` environment variable, then the ``DBInfo.json`` at the
+project root (derived from this package's location, so the project runs from
+any directory).
 """
 
 import json
 import os
+from pathlib import Path
 from typing import Literal
 
-DEFAULT_DBINFO_PATH = "/root/DataInfra/DBInfo.json"
+# <project root>/DBInfo.json, where <project root> is two levels above this
+# file (visualize/app/config.py -> visualize/ -> <project root>).
+DEFAULT_DBINFO_PATH = str(Path(__file__).resolve().parents[2] / "DBInfo.json")
 ENV_VAR = "VISUALIZE_DBINFO"
 
 PRODUCTION_USER = "reader"

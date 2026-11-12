@@ -9,8 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-# Must happen BEFORE any `app.*` import in this session.
-os.environ["VISUALIZE_DBINFO"] = "/root/DataInfra/DBInfo.mock.json"
+# Must happen BEFORE any `app.*` import in this session. Derived from this
+# file's location so the suite runs from any checkout directory.
+os.environ["VISUALIZE_DBINFO"] = str(
+    Path(__file__).resolve().parents[2] / "DBInfo.mock.json"
+)
 
 # Make `app` importable when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

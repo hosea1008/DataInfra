@@ -40,7 +40,7 @@ fi
 # --- Start -----------------------------------------------------------------
 # Launch from $ROOT so uvicorn's --app-dir relative layout is unambiguous.
 cd "$ROOT"
-nohup "$ROOT/visualize/.venv/bin/python" -m uvicorn app.main:app --app-dir "$ROOT/visualize" --host 0.0.0.0 --port 8080 >> "$LOG_FILE" 2>&1 &
+nohup python -m uvicorn app.main:app --app-dir "$ROOT/visualize" --host 0.0.0.0 --port 8080 >> "$LOG_FILE" 2>&1 &
 PID="$!"
 echo "$PID" > "$PID_FILE"
 

@@ -1,0 +1,8 @@
+# visualize 网站服务运行依赖（与 visualize/.venv 一致，Python 3.12）
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+psycopg2-binary==2.9.13
+
+# 测试依赖（运行 visualize/tests 时安装）
+pytest==9.2.0
+httpx==0.28.1
