@@ -1,5 +1,6 @@
 """Validation and transactional updates for the standalone EFS path script."""
 
+import csv
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,6 +9,31 @@ import pytest
 
 from app.config import get_conn_params
 from scripts import migrate_efs_paths as migrate
+
+
+def test_script_location_and_bounded_grouped_verification(tmp_path, monkeypatch):
+    assert migrate.DEFAULT_DBINFO == Path(__file__).resolve().parents[2] / "DBInfo.json"
+    calls = []
+
+    def verify(item):
+        calls.append((item.old_path, item.new_path))
+        if item.old_path == "bad":
+            raise migrate.VerificationError("different content")
+
+    monkeypatch.setattr(migrate, "verify_candidate", verify)
+    items = [migrate.Candidate(str(n), "good", "new") for n in range(100)]
+    items += [migrate.Candidate("bad-1", "bad", "other"), migrate.Candidate("bad-2", "bad", "other")]
+    report = tmp_path / "results.csv"
+    updates = []
+    failed = migrate.verify_all(items, workers=2, report_path=report,
+                                progress=lambda *args: updates.append(args))
+    assert failed == 2
+    assert len(calls) == 2  # identical paths are compared only once
+    assert updates[-1][:3] == (102, 102, 2)
+    with report.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert len(rows) == 102
+    assert sum(row["result"] == "FAILED" for row in rows) == 2
 
 
 def _pair(tmp_path: Path):

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify and migrate EFS lerobot paths in the production database.
 
-Preview (read-only): python visualize/scripts/migrate_efs_paths.py
-Write after reviewing the preview: python visualize/scripts/migrate_efs_paths.py --apply
+Preview (read-only): python scripts/migrate_efs_paths.py
+Write after reviewing the preview: python scripts/migrate_efs_paths.py --apply
 
 Any missing, empty, unreadable, or different directory aborts the entire run.
 Updates to status, lerobot_episode, and data share one transaction. The script
@@ -11,12 +11,17 @@ forced reader connection; --apply therefore needs a database writer account.
 """
 
 import argparse
+import csv
 import json
 import os
 import stat
 import sys
+import time
+from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import psycopg2
 from psycopg2 import sql
@@ -26,7 +31,9 @@ OLD_PREFIX = "/efs-mi-east4-hpc/"
 NEW_PREFIX = "/efs-mi-east4-4/"
 TABLES = ("status", "lerobot_episode", "data")
 BUFFER_SIZE = 1024 * 1024
-DEFAULT_DBINFO = Path(__file__).resolve().parents[2] / "DBInfo.json"
+DEFAULT_DBINFO = Path(__file__).resolve().parents[1] / "DBInfo.json"
+DEFAULT_WORKERS = 4
+MAX_WARNINGS_SHOWN = 20
 
 
 class VerificationError(Exception):
@@ -111,7 +118,7 @@ def verify_candidate(candidate: Candidate) -> None:
 def find_candidates(cur, schema: str = "public") -> list[Candidate]:
     cur.execute(
         sql.SQL("SELECT lerobot_uuid::text, lerobot_path FROM {}.status "
-                "WHERE strpos(lerobot_path, %s) > 0 ORDER BY lerobot_uuid")
+                "WHERE strpos(lerobot_path, %s) > 0")
         .format(sql.Identifier(schema)),
         (OLD_PREFIX,),
     )
@@ -123,6 +130,73 @@ def find_candidates(cur, schema: str = "public") -> list[Candidate]:
         seen.add(uuid)
         candidates.append(Candidate(uuid, old_path, old_path.replace(OLD_PREFIX, NEW_PREFIX)))
     return candidates
+
+
+def verify_all(
+    candidates: list[Candidate], workers: int = DEFAULT_WORKERS,
+    report_path: Path | None = None,
+    progress: Callable[[int, int, int, float], None] | None = None,
+) -> int:
+    """Verify unique path pairs with bounded I/O concurrency; return failures.
+
+    Each UUID still gets a result in the optional CSV. No more than twice the
+    worker count is queued, keeping memory bounded even for large inventories.
+    """
+    grouped: dict[tuple[str, str], list[Candidate]] = defaultdict(list)
+    for item in candidates:
+        grouped[(item.old_path, item.new_path)].append(item)
+    groups = iter(grouped.values())
+    completed = failures = shown = 0
+    started = last_progress = time.monotonic()
+    report_file = report_path.open("w", encoding="utf-8", newline="") if report_path else None
+    try:
+        writer = csv.writer(report_file) if report_file else None
+        if writer:
+            writer.writerow(("lerobot_uuid", "old_path", "new_path", "result", "detail"))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            pending = {}
+
+            def fill_queue() -> None:
+                while len(pending) < workers * 2:
+                    group = next(groups, None)
+                    if group is None:
+                        break
+                    pending[executor.submit(verify_candidate, group[0])] = group
+
+            fill_queue()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    group = pending.pop(future)
+                    error = None
+                    try:
+                        future.result()
+                    except VerificationError as exc:
+                        error = str(exc)
+                    completed += len(group)
+                    if error:
+                        failures += len(group)
+                        for item in group:
+                            if shown < MAX_WARNINGS_SHOWN:
+                                print(f"WARNING {item.uuid}: {error}", file=sys.stderr)
+                                shown += 1
+                    if writer:
+                        for item in group:
+                            writer.writerow((item.uuid, item.old_path, item.new_path,
+                                             "FAILED" if error else "OK", error or ""))
+                now = time.monotonic()
+                if progress and (now - last_progress >= 5 or completed == len(candidates)):
+                    progress(completed, len(candidates), failures, now - started)
+                    last_progress = now
+                fill_queue()
+        if failures > shown:
+            print(f"... {failures - shown} additional failures omitted from console output.", file=sys.stderr)
+            if report_path is None:
+                print("Run with --report PATH to save every result.", file=sys.stderr)
+        return failures
+    finally:
+        if report_file:
+            report_file.close()
 
 
 def _uuid_type(cur, table: str, schema: str) -> str:
@@ -139,7 +213,10 @@ def _uuid_type(cur, table: str, schema: str) -> str:
     return "uuid" if row[0] else "text"
 
 
-def apply_updates(conn, candidates: list[Candidate], schema: str = "public") -> dict[str, int]:
+def apply_updates(
+    conn, candidates: list[Candidate], schema: str = "public",
+    progress: Callable[[str, int | None], None] | None = None,
+) -> dict[str, int]:
     """Lock and recheck status, then update all three tables atomically."""
     if not candidates:
         return {table: 0 for table in TABLES}
@@ -179,6 +256,8 @@ def apply_updates(conn, candidates: list[Candidate], schema: str = "public") -> 
 
             changed = {}
             for table in TABLES:
+                if progress:
+                    progress(table, None)
                 cast = sql.SQL("::uuid") if column_types[table] == "uuid" else sql.SQL("")
                 extra = sql.SQL(" AND t.lerobot_path = r.old_path") if table == "status" else sql.SQL("")
                 cur.execute(
@@ -189,6 +268,8 @@ def apply_updates(conn, candidates: list[Candidate], schema: str = "public") -> 
                     .format(sql.Identifier(schema), sql.Identifier(table), cast, extra)
                 )
                 changed[table] = cur.rowcount
+                if progress:
+                    progress(table, changed[table])
             if changed["status"] != len(candidates):
                 raise VerificationError("status update count mismatch; transaction rolled back")
         conn.commit()
@@ -206,9 +287,17 @@ def connection_params(dbinfo_path: Path) -> dict:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Verify and migrate EFS lerobot paths in production.",
+        epilog="Preview: python scripts/migrate_efs_paths.py\n"
+               "Write:   python scripts/migrate_efs_paths.py --apply",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--dbinfo", type=Path, default=Path(os.environ.get("VISUALIZE_DBINFO", DEFAULT_DBINFO)))
     parser.add_argument("--apply", action="store_true", help="write the verified changes in one transaction")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, choices=range(1, 17),
+                        metavar="1-16", help=f"parallel directory checks (default: {DEFAULT_WORKERS})")
+    parser.add_argument("--report", type=Path, help="write every UUID and verification result to a CSV file")
     args = parser.parse_args(argv)
     try:
         params = connection_params(args.dbinfo)
@@ -217,26 +306,37 @@ def main(argv=None) -> int:
             conn.autocommit = True  # don't hold a DB transaction during filesystem comparison
             with conn.cursor() as cur:
                 candidates = find_candidates(cur)
-            print(f"Found {len(candidates)} matching status rows.")
+            unique_paths = len({(item.old_path, item.new_path) for item in candidates})
+            print(f"Found {len(candidates)} matching status rows ({unique_paths} unique path pairs).", flush=True)
             if not candidates:
                 return 0
-            failed = []
-            for index, item in enumerate(candidates, 1):
-                try:
-                    verify_candidate(item)
-                    print(f"[{index}/{len(candidates)}] OK {item.uuid}: {item.old_path} -> {item.new_path}")
-                except VerificationError as exc:
-                    print(f"[{index}/{len(candidates)}] WARNING {item.uuid}: {exc}", file=sys.stderr)
-                    failed.append(item.uuid)
-            if failed:
-                print(f"Aborted: {len(failed)} path(s) failed verification; no database rows changed.", file=sys.stderr)
+            print(f"Verifying exact content with {args.workers} worker(s)...", flush=True)
+
+            def show_progress(done: int, total: int, failures: int, elapsed: float) -> None:
+                rate = done / elapsed if elapsed > 0 else 0
+                eta = (total - done) / rate if rate else 0
+                print(f"Verified {done:,}/{total:,} ({done / total:.0%}); "
+                      f"failed {failures:,}; elapsed {elapsed:.0f}s; ETA {eta:.0f}s", flush=True)
+
+            failures = verify_all(candidates, args.workers, args.report, show_progress)
+            if args.report:
+                print(f"Detailed report: {args.report}")
+            if failures:
+                print(f"Aborted: {failures:,} path(s) failed verification; no database rows changed.", file=sys.stderr)
                 return 1
             if not args.apply:
-                print("Verification passed; no rows changed. Run again with --apply to update all three tables.")
+                print("All paths verified; no rows changed. Run with --apply to update all three tables.")
                 return 0
             conn.autocommit = False
-            changed = apply_updates(conn, candidates)
-            print("Committed updates: " + ", ".join(f"{table}={changed[table]}" for table in TABLES))
+
+            def show_update(table: str, count: int | None) -> None:
+                if count is None:
+                    print(f"Updating {table}...", flush=True)
+                else:
+                    print(f"Updated {table}: {count:,} rows", flush=True)
+
+            changed = apply_updates(conn, candidates, progress=show_update)
+            print("Committed updates: " + ", ".join(f"{table}={changed[table]:,}" for table in TABLES))
             return 0
         finally:
             conn.close()
