@@ -34,6 +34,7 @@ CONVERT_PATH_COLUMN = "s_convert_55d_v_v1_c_lerobot_path"
 DEFAULT_DBINFO = Path(__file__).resolve().parents[1] / "DBInfo.json"
 DEFAULT_WORKERS = 4
 MAX_WARNINGS_SHOWN = 20
+DEFAULT_LOCK_TIMEOUT_SECONDS = 60
 
 
 class VerificationError(Exception):
@@ -219,18 +220,22 @@ def _has_column(cur, schema: str, table: str, column: str) -> bool:
 def apply_updates(
     conn, candidates: list[Candidate], schema: str = "public",
     progress: Callable[[str, int | None], None] | None = None,
+    lock_timeout_seconds: int = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> dict[str, int]:
     """Lock and recheck status, then update all three tables atomically."""
     if not candidates:
         return {table: 0 for table in TABLES}
     if conn.autocommit:
         raise ValueError("apply_updates requires autocommit=False for atomic updates")
+    if lock_timeout_seconds < 0:
+        raise ValueError("lock_timeout_seconds must be non-negative")
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT current_user")
             if cur.fetchone()[0] == "reader":
                 raise VerificationError("--apply requires a writer account, not reader")
-            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SELECT set_config('lock_timeout', %s, true)",
+                        (f"{lock_timeout_seconds}s",))
             cur.execute(
                 "CREATE TEMP TABLE efs_path_replacements "
                 "(uuid_text text PRIMARY KEY, old_path text NOT NULL, new_path text NOT NULL) "
@@ -349,6 +354,9 @@ def main(argv=None) -> int:
     parser.add_argument("--diagnose", action="store_true", help="show data table indexes and active update waits; read-only")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, choices=range(1, 17),
                         metavar="1-16", help=f"parallel directory checks (default: {DEFAULT_WORKERS})")
+    parser.add_argument("--lock-timeout", type=int, default=DEFAULT_LOCK_TIMEOUT_SECONDS,
+                        metavar="SECONDS", help="maximum wait for each database lock during --apply "
+                        f"(default: {DEFAULT_LOCK_TIMEOUT_SECONDS}s; 0 disables the limit)")
     parser.add_argument("--report", type=Path, help="write every UUID and verification result to a CSV file")
     args = parser.parse_args(argv)
     try:
@@ -392,7 +400,8 @@ def main(argv=None) -> int:
                 else:
                     print(f"Updated {table}: {count:,} rows", flush=True)
 
-            changed = apply_updates(conn, candidates, progress=show_update)
+            changed = apply_updates(conn, candidates, progress=show_update,
+                                    lock_timeout_seconds=args.lock_timeout)
             print("Committed updates: " + ", ".join(f"{table}={changed[table]:,}" for table in TABLES))
             return 0
         finally:
