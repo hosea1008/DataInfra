@@ -52,13 +52,20 @@ class DatasetTotals(BaseModel):
 
 
 class DatasetStatsResponse(BaseModel):
-    """Per-dataset pie payloads: lerobot count / episode count / total hours."""
+    """Per-dataset pie payloads: lerobot count / episode count / total hours.
+
+    ``sampled``/``sample_pct`` describe the hours pie only: when the ``data``
+    table is huge its aggregation runs on a TABLESAMPLE subset and counts are
+    scaled-up estimates (ratios are unaffected).
+    """
 
     cached_at: datetime | None = None
     totals: DatasetTotals = Field(default_factory=DatasetTotals)
     lerobots: list[DatasetStatItem] = Field(default_factory=list)
     episodes: list[DatasetStatItem] = Field(default_factory=list)
     hours: list[DatasetStatItem] = Field(default_factory=list)
+    sampled: bool = False
+    sample_pct: float | None = None
 
 
 class ColumnInfoItem(BaseModel):
@@ -82,12 +89,21 @@ class DistItem(BaseModel):
 
 
 class ColumnDistResponse(BaseModel):
+    """Value distribution of one ``data`` column.
+
+    ``sampled``/``sample_pct`` flag estimations produced from a TABLESAMPLE
+    subset of a huge ``data`` table (rows/hours scaled back up; exact via
+    refresh).
+    """
+
     column: str
     cached_at: datetime | None = None
     items: list[DistItem] = Field(default_factory=list)
     other: DistItem | None = None
     total_rows: int | None = None
     total_hours: float | None = None
+    sampled: bool = False
+    sample_pct: float | None = None
 
 
 class VersionProgressItem(BaseModel):

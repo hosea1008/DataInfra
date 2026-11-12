@@ -4,15 +4,32 @@ Everything here reads the PRODUCTION env only. All dynamic SQL identifiers go
 through ``qident`` (whitelist-validated + psycopg2 sql.Identifier composition);
 the data-column whitelist is read live from pg_catalog on every cache miss.
 
-Caching: one process-wide TTL cache (600 s). Endpoints pass ``refresh=1`` to
-bypass a hit and repopulate the entry; ``cached_at`` on the responses is the
-moment the payload was computed (and stored), not served.
+Caching: one process-wide TTL cache (600 s).
+
+- Dataset stats are cached as a whole under ``("datasets",)``.
+- Column distributions cache the *full bucket aggregation* per column under
+  ``("column_dist", column)``; ``weight`` / ``top_k`` slicing happens on every
+  request in Python, so switching the measure or Top-K never re-runs SQL.
+
+Single-flight: a per-key lock ensures only one thread computes a cold/expired
+entry; concurrent callers wait and then take the freshly cached result instead
+of piling duplicate multi-minute scans onto the pool.
+
+Sampling: the ``data`` table holds tens of millions of rows, so a full-table
+GROUP BY can run for minutes. When pg_class estimates it above
+``SAMPLE_THRESHOLD_ROWS`` rows, aggregates run against
+``TABLESAMPLE SYSTEM (pct)`` targeting ~``SAMPLE_TARGET_ROWS`` sampled rows and
+the row/hour counts are scaled back up (1/pct); ratios are unaffected. The
+response is flagged ``sampled``/``sample_pct`` so the UI can label estimates.
+``refresh=1`` always recomputes with a full exact scan and repopulates the
+cache; ``cached_at`` is the moment the payload was computed (and stored).
 """
 
 import re
 import threading
 import time
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +54,13 @@ DYNAMIC_COLUMN_RE = re.compile(r"^s_.+_v_\d+_c_.+$")
 
 #: Sentinel value of the aggregated "everything past top_k" bucket.
 OTHER_VALUE = "__other__"
+
+#: Tables with at least this many live rows (pg_class.reltuples estimate) are
+#: aggregated via TABLESAMPLE instead of a full scan.
+SAMPLE_THRESHOLD_ROWS = 1_000_000
+
+#: Rough number of rows a sampled aggregation aims to read.
+SAMPLE_TARGET_ROWS = 300_000
 
 
 class TTLCache:
@@ -64,12 +88,71 @@ class TTLCache:
         with self._lock:
             self._entries[key] = (time.monotonic(), payload)
 
+    def clear(self) -> None:
+        """Drop every cached payload."""
+        with self._lock:
+            self._entries.clear()
+
 
 _CACHE = TTLCache()
 
 
+def clear_cache() -> None:
+    """Drop every cached statistics payload (used by tests and manual resets)."""
+    _CACHE.clear()
+
+
+# --- single-flight ---------------------------------------------------------
+
+_flight_registry_lock = threading.Lock()
+_flight_locks: dict[Hashable, threading.Lock] = {}
+
+
+@contextmanager
+def _singleflight(key: Hashable) -> Iterator[None]:
+    """Serialize cache population per ``key``.
+
+    Concurrent callers of a cold entry block here; the winner computes and
+    stores, the losers re-read the cache inside the critical section instead
+    of launching duplicate heavy scans. Entries are never removed: the key
+    space is bounded by the column inventory of the ``data`` table.
+    """
+    with _flight_registry_lock:
+        lock = _flight_locks.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
 def _round6(value: float) -> float:
     return round(value, 6)
+
+
+# --- sampling --------------------------------------------------------------
+
+
+def _sample_pct(cur) -> float | None:
+    """TABLESAMPLE percentage for table ``data``, or None when a full scan is fine.
+
+    The size estimate comes from pg_class.reltuples (kept fresh by autovacuum);
+    a negative/missing estimate means "unknown" and falls back to a full scan.
+    """
+    cur.execute("SELECT reltuples FROM pg_class WHERE oid = to_regclass(%s)", ("data",))
+    row = cur.fetchone()
+    est = float(row["reltuples"]) if row and row["reltuples"] is not None else -1.0
+    if est < SAMPLE_THRESHOLD_ROWS:
+        return None
+    return max(0.5, min(100.0, SAMPLE_TARGET_ROWS * 100.0 / est))
+
+
+def _sample_clause(pct: float | None) -> sql.Composable:
+    """``TABLESAMPLE SYSTEM (pct)`` SQL fragment; empty for a full scan.
+
+    ``pct`` is a locally clamped float rendered via sql.Literal (never quoted,
+    never user input), so this composition is injection-safe.
+    """
+    if pct is None:
+        return sql.SQL("")
+    return sql.SQL(" TABLESAMPLE SYSTEM ({})").format(sql.Literal(pct))
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +160,7 @@ def _round6(value: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_dataset_values(cur, query: str) -> list[tuple[str, float]]:
+def _fetch_dataset_values(cur, query: str | sql.Composable) -> list[tuple[str, float]]:
     """Run a ``dataset_name, value`` GROUP BY query; return pairs sorted by name."""
     cur.execute(query)
     pairs = [(row["dataset_name"], float(row["value"])) for row in cur.fetchall()]
@@ -98,15 +181,8 @@ def _stat_items(pairs: list[tuple[str, float]]) -> list[DatasetStatItem]:
     ]
 
 
-def get_dataset_stats(pools: PoolManager, refresh: bool = False) -> DatasetStatsResponse:
-    """Per-dataset pies: lerobot count (status), episode count (lerobot_episode),
-    total hours (data.origin_video_duration_s / 3600)."""
-    key = ("datasets",)
-    if not refresh:
-        cached = _CACHE.get(key)
-        if cached is not None:
-            return cached
-
+def _compute_dataset_stats(pools: PoolManager, *, exact: bool) -> DatasetStatsResponse:
+    """Run the three per-dataset aggregations (hours optionally sampled)."""
     with pools.cursor("production", dict_cursor=True) as cur:
         lerobots = _fetch_dataset_values(
             cur, "SELECT dataset_name, count(*) AS value FROM status GROUP BY 1"
@@ -116,13 +192,19 @@ def get_dataset_stats(pools: PoolManager, refresh: bool = False) -> DatasetStats
             "SELECT dataset_name, sum(episode_count) AS value "
             "FROM lerobot_episode GROUP BY 1",
         )
+        pct = None if exact else _sample_pct(cur)
         hours = _fetch_dataset_values(
             cur,
-            "SELECT dataset_name, sum(origin_video_duration_s)/3600.0 AS value "
-            "FROM data GROUP BY 1",
+            sql.SQL(
+                "SELECT dataset_name, sum(origin_video_duration_s)/3600.0 AS value "
+                "FROM data{sample} GROUP BY 1"
+            ).format(sample=_sample_clause(pct)),
         )
 
-    response = DatasetStatsResponse(
+    scale = 100.0 / pct if pct is not None else 1.0
+    hours = [(name, value * scale) for name, value in hours]
+
+    return DatasetStatsResponse(
         cached_at=datetime.now(UTC),
         totals=DatasetTotals(
             lerobots=int(sum(value for _, value in lerobots)),
@@ -132,9 +214,29 @@ def get_dataset_stats(pools: PoolManager, refresh: bool = False) -> DatasetStats
         lerobots=_stat_items(lerobots),
         episodes=_stat_items(episodes),
         hours=_stat_items(hours),
+        sampled=pct is not None,
+        sample_pct=pct,
     )
-    _CACHE.set(key, response)
-    return response
+
+
+def get_dataset_stats(pools: PoolManager, refresh: bool = False) -> DatasetStatsResponse:
+    """Per-dataset pies: lerobot count (status), episode count (lerobot_episode),
+    total hours (data.origin_video_duration_s / 3600, sampled on big tables).
+
+    ``refresh=True`` forces a fresh, unsampled (exact) recomputation."""
+    key = ("datasets",)
+    if not refresh:
+        cached = _CACHE.get(key)
+        if cached is not None:
+            return cached
+    with _singleflight(key):
+        if not refresh:
+            cached = _CACHE.get(key)
+            if cached is not None:
+                return cached
+        response = _compute_dataset_stats(pools, exact=refresh)
+        _CACHE.set(key, response)
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +289,44 @@ def _dist_item(bucket: dict, total_rows: int, total_hours: float) -> DistItem:
     )
 
 
+def _compute_dist_buckets(
+    pools: PoolManager, column: str, *, exact: bool
+) -> dict[str, Any]:
+    """Aggregate every value bucket of ``data.<column>`` (sampled on big tables).
+
+    Returns the cache entry: full bucket list (rows/hours scaled back up when
+    sampled), sampling flags, and the computation timestamp.
+    """
+    with pools.cursor("production", dict_cursor=True) as cur:
+        if column not in fetch_table_columns(cur, "data"):
+            raise ValueError(f"unknown column of 'data': {column!r}")
+        pct = None if exact else _sample_pct(cur)
+        cur.execute(
+            sql.SQL(
+                "SELECT {col} AS value, count(*) AS rows, "
+                "sum(origin_video_duration_s)/3600.0 AS hours "
+                "FROM data{sample} GROUP BY 1"
+            ).format(col=qident(column), sample=_sample_clause(pct))
+        )
+        raw = cur.fetchall()
+
+    scale = 100.0 / pct if pct is not None else 1.0
+    buckets = [
+        {
+            "value": row["value"],
+            "rows": int(round(row["rows"] * scale)),
+            "hours": float(row["hours"] or 0.0) * scale,
+        }
+        for row in raw
+    ]
+    return {
+        "buckets": buckets,
+        "sampled": pct is not None,
+        "sample_pct": pct,
+        "cached_at": datetime.now(UTC),
+    }
+
+
 def get_column_distribution(
     pools: PoolManager,
     *,
@@ -201,34 +341,22 @@ def get_column_distribution(
     the first ``top_k`` become items, the remainder is aggregated into
     ``other`` (None when the remainder is empty). NULL surfaces as a bucket
     with value None. Raises ValueError for a non-whitelisted column.
+
+    The expensive part (the full/sample aggregation) is cached per column;
+    weight/top_k only affect the cheap Python-side slicing, so switching them
+    re-runs no SQL. ``refresh=True`` recomputes exactly (full table scan).
     """
     validate_identifier(column)
-    key = ("column_dist", column, weight, top_k)
-    if not refresh:
-        cached = _CACHE.get(key)
-        if cached is not None:
-            return cached
+    key = ("column_dist", column)
+    entry = None if refresh else _CACHE.get(key)
+    if entry is None:
+        with _singleflight(key):
+            entry = None if refresh else _CACHE.get(key)
+            if entry is None:
+                entry = _compute_dist_buckets(pools, column, exact=refresh)
+                _CACHE.set(key, entry)
 
-    with pools.cursor("production", dict_cursor=True) as cur:
-        if column not in fetch_table_columns(cur, "data"):
-            raise ValueError(f"unknown column of 'data': {column!r}")
-        cur.execute(
-            sql.SQL(
-                "SELECT {col} AS value, count(*) AS rows, "
-                "sum(origin_video_duration_s)/3600.0 AS hours "
-                "FROM data GROUP BY 1"
-            ).format(col=qident(column))
-        )
-        buckets = [
-            {
-                "value": row["value"],
-                "rows": int(row["rows"]),
-                "hours": float(row["hours"] or 0.0),
-            }
-            for row in cur.fetchall()
-        ]
-
-    buckets.sort(key=lambda bucket: bucket[weight], reverse=True)
+    buckets = sorted(entry["buckets"], key=lambda bucket: bucket[weight], reverse=True)
     total_rows = sum(bucket["rows"] for bucket in buckets)
     total_hours = sum(bucket["hours"] for bucket in buckets)
 
@@ -246,13 +374,13 @@ def get_column_distribution(
             total_hours,
         )
 
-    response = ColumnDistResponse(
+    return ColumnDistResponse(
         column=column,
-        cached_at=datetime.now(UTC),
+        cached_at=entry["cached_at"],
+        sampled=entry["sampled"],
+        sample_pct=entry["sample_pct"],
         items=items,
         other=other,
         total_rows=total_rows,
         total_hours=total_hours,
     )
-    _CACHE.set(key, response)
-    return response

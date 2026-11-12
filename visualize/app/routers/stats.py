@@ -6,7 +6,9 @@ Routes (mounted by app.main auto-include):
 - GET /api/stats/column-distribution?column=X&weight=...     -> ColumnDistResponse
 
 All SQL lives in app.services.stats_service behind a 600 s TTL cache;
-``refresh=1`` on the cached endpoints bypasses and repopulates the entry.
+``refresh=1`` on the cached endpoints recomputes with a full exact scan and
+repopulates the entry (column distributions otherwise sample huge ``data``
+tables via TABLESAMPLE — see that module for the strategy).
 """
 
 from typing import Literal

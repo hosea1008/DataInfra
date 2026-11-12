@@ -3,12 +3,23 @@
  * 3 dataset pie cards (lerobot数 / episode数 / 总时长) + column-distribution card.
  */
 import { api } from "./api.js";
-import { el, replaceChildren, fmtInt, fmtHours, fmtPct, fmtDateTime, scalarToText, escapeHtml } from "./util.js";
+import {
+  el,
+  replaceChildren,
+  fmtInt,
+  fmtHours,
+  fmtPct,
+  fmtCompact,
+  fmtDateTime,
+  scalarToText,
+  escapeHtml,
+} from "./util.js";
 import {
   segToggle,
   loadingBlock,
   errorBanner,
   emptyState,
+  warningBanner,
 } from "./components.js";
 import { renderPie } from "./charts.js";
 
@@ -28,25 +39,44 @@ let distBox = null;
 let distMeta = null;
 let columnSelect = null;
 
+/* ---------- shared helpers ---------- */
+
+function legendValueOf(unitKind) {
+  return (it) =>
+    unitKind === "hours" ? `${fmtHours(it.value)}h` : fmtInt(it.value);
+}
+
+function sampledBadge(pct) {
+  const pctText = pct != null ? ` ${Number(pct).toFixed(1)}%` : "";
+  return el(
+    "span",
+    {
+      class: "badge badge-approx",
+      title:
+        "data 表数据量较大，本结果按抽样统计估算（比例可靠，绝对值为估算）；" +
+        "点“刷新”可精确重算（扫描全表，较慢）",
+    },
+    `抽样估算${pctText}`
+  );
+}
+
 /* ---------- dataset pies ---------- */
 
 function pieTooltip(unitKind) {
   return (p) => {
     const name = escapeHtml(p.name);
     const value =
-      unitKind === "hours"
-        ? `${fmtHours(p.value)} 小时`
-        : `${fmtInt(p.value)}`;
-    const ratio = p.percent != null ? `${Number(p.percent).toFixed(1)}%` : "-";
+      unitKind === "hours" ? `${fmtHours(p.value)} 小时` : fmtInt(p.value);
+    // p.percent is recomputed over visible slices only; prefer the original
+    // full-dataset ratio from meta so tooltip stays consistent with legend.
+    const meta = p.data && p.data.meta;
+    const ratio =
+      meta && meta.ratio != null
+        ? fmtPct(meta.ratio)
+        : p.percent != null
+          ? `${p.percent.toFixed(1)}%`
+          : "-";
     return `${name}<br/>数值：${value}<br/>占比：${ratio}`;
-  };
-}
-
-function legendText(unitKind) {
-  return (it) => {
-    const value = unitKind === "hours" ? `${fmtHours(it.value)}h` : fmtInt(it.value);
-    const pct = it.ratio != null ? `${(it.ratio * 100).toFixed(1)}%` : "-";
-    return `${it.name} ${value} (${pct})`;
   };
 }
 
@@ -59,14 +89,39 @@ function toPieData(items) {
   }));
 }
 
-async function loadPies() {
-  replaceChildren(piesBox, loadingBlock("加载数据集统计…"));
+async function loadPies(refresh = false) {
+  // On a refresh keep the current pies visible while recomputing.
+  if (!refresh || !piesBox.firstChild) {
+    replaceChildren(
+      piesBox,
+      loadingBlock(
+        refresh
+          ? "正在精确统计（扫描 data 全表，可能需要数分钟）…"
+          : "加载数据集统计…"
+      )
+    );
+  }
   try {
-    const data = await api.statsDatasets(false);
+    const data = await api.statsDatasets(refresh);
     const specs = [
-      { title: "lerobot 数", items: data.lerobots, unit: "count" },
-      { title: "episode 数", items: data.episodes, unit: "count" },
-      { title: "总时长（小时）", items: data.hours, unit: "hours" },
+      {
+        title: "lerobot 数",
+        items: data.lerobots,
+        unit: "count",
+        center: { value: fmtCompact(data.totals.lerobots), label: "lerobot 总数" },
+      },
+      {
+        title: "episode 数",
+        items: data.episodes,
+        unit: "count",
+        center: { value: fmtCompact(data.totals.episodes), label: "episode 总数" },
+      },
+      {
+        title: "总时长（小时）",
+        items: data.hours,
+        unit: "hours",
+        center: { value: fmtCompact(data.totals.hours), label: "总小时" },
+      },
     ];
     const cards = specs.map((spec) => {
       const canvas = el("div", { class: "pie-canvas" });
@@ -88,13 +143,18 @@ async function loadPies() {
       renderPie(canvas, {
         data: pieData,
         tooltipFormatter: pieTooltip(spec.unit),
-        legendFormatter: legendText(spec.unit),
+        legendValue: legendValueOf(spec.unit),
+        centerLabel: spec.center,
       });
     }
-    replaceChildren(
-      piesMeta,
-      el("span", { class: "cached-at", text: `缓存时间：${fmtDateTime(data.cached_at)}` })
-    );
+    const metaChildren = [
+      el("span", {
+        class: "cached-at",
+        text: `缓存时间：${fmtDateTime(data.cached_at)}`,
+      }),
+    ];
+    if (data.sampled) metaChildren.push(sampledBadge(data.sample_pct));
+    replaceChildren(piesMeta, ...metaChildren);
   } catch (err) {
     replaceChildren(piesBox, errorBanner(err));
   }
@@ -120,7 +180,27 @@ function distTooltip(p) {
   ].join("<br/>");
 }
 
-async function loadDistribution() {
+function renderDistMeta(data, warningText) {
+  const children = [];
+  if (warningText) children.push(warningBanner(warningText));
+  const approx = data.sampled ? "≈ " : "";
+  children.push(
+    el("span", {
+      class: "cached-at",
+      text: `总行数 ${approx}${fmtInt(data.total_rows)} · 总时长 ${approx}${fmtHours(data.total_hours)} 小时`,
+    })
+  );
+  if (data.sampled) children.push(sampledBadge(data.sample_pct));
+  children.push(
+    el("span", {
+      class: "cached-at",
+      text: `缓存时间：${fmtDateTime(data.cached_at)}`,
+    })
+  );
+  replaceChildren(distMeta, ...children);
+}
+
+async function loadDistribution(warningText = null) {
   if (!state.column) return;
   replaceChildren(distBox, loadingBlock("加载列分布…"));
   try {
@@ -153,16 +233,13 @@ async function loadDistribution() {
       renderPie(canvas, {
         data: items,
         tooltipFormatter: distTooltip,
-        legendFormatter: legendText(useHours ? "hours" : "count"),
+        legendValue: legendValueOf(useHours ? "hours" : "count"),
+        centerLabel: useHours
+          ? { value: fmtCompact(data.total_hours), label: "总小时" }
+          : { value: fmtCompact(data.total_rows), label: "总行数" },
       });
     }
-    replaceChildren(
-      distMeta,
-      el("span", {
-        class: "cached-at",
-        text: `总行数 ${fmtInt(data.total_rows)} · 总时长 ${fmtHours(data.total_hours)} 小时 · 缓存时间：${fmtDateTime(data.cached_at)}`,
-      })
-    );
+    renderDistMeta(data, warningText);
   } catch (err) {
     replaceChildren(distBox, errorBanner(err));
   }
@@ -230,11 +307,31 @@ export function activate(root) {
   state.inited = true;
 
   piesBox = el("div", { class: "pie-row" });
-  piesMeta = el("div");
+  piesMeta = el("div", { class: "meta-line" });
   distBox = el("div");
-  distMeta = el("div", { style: "margin-top: 8px" });
+  distMeta = el("div", { class: "meta-line" });
 
   columnSelect = el("select", { "aria-label": "统计列" });
+
+  const piesRefreshBtn = el(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      title: "重新统计（时长饼图需扫描 data 全表，可能需要数分钟）",
+      onclick: async () => {
+        piesRefreshBtn.disabled = true;
+        piesRefreshBtn.textContent = "统计中…";
+        try {
+          await loadPies(true);
+        } finally {
+          piesRefreshBtn.disabled = false;
+          piesRefreshBtn.textContent = "刷新";
+        }
+      },
+    },
+    "刷新"
+  );
 
   const weightToggle = segToggle(
     [
@@ -269,8 +366,11 @@ export function activate(root) {
     {
       class: "btn",
       type: "button",
+      title: "精确重算本列分布（扫描 data 全表，可能需要数分钟）",
       onclick: async () => {
         refreshBtn.disabled = true;
+        refreshBtn.textContent = "精确统计中…";
+        let err = null;
         try {
           await api.columnDistribution({
             column: state.column,
@@ -278,11 +378,14 @@ export function activate(root) {
             topK: state.topK,
             refresh: true,
           });
-        } catch {
-          /* refresh failure surfaces via the reload below if still broken */
+        } catch (e) {
+          err = e;
         }
         refreshBtn.disabled = false;
-        loadDistribution();
+        refreshBtn.textContent = "刷新";
+        loadDistribution(
+          err ? `精确统计失败：${err.message}（以下为缓存结果）` : null
+        );
       },
     },
     "刷新"
@@ -290,12 +393,21 @@ export function activate(root) {
 
   replaceChildren(
     root,
-    el("div", { class: "card" },
-      el("h3", { class: "card-title" }, "数据集统计（生产库）"),
+    el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "stats-card-head" },
+        el("h3", { class: "card-title" }, "数据集统计（生产库）"),
+        piesRefreshBtn
+      ),
       piesMeta,
       piesBox
     ),
-    el("div", { class: "card" },
+    el(
+      "div",
+      { class: "card" },
       el("h3", { class: "card-title" }, "列值分布"),
       el(
         "div",

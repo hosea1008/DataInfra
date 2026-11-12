@@ -550,6 +550,95 @@ label { cursor: pointer; }
 
 .pie-canvas { width: 100%; height: 320px; }
 
+/* chart area + HTML legend, flex side by side inside a pie canvas */
+.pie-flex {
+  display: flex;
+  min-width: 0;
+  gap: var(--space-4);
+  align-items: stretch;
+}
+
+.pie-chart-area { flex: 1 1 0; min-width: 0; }
+
+.pie-legend {
+  flex: 1 1 0;
+  min-width: 120px;
+  max-width: 420px;
+  max-height: 100%;
+  margin: auto 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pie-legend-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.pie-legend-row:hover { background: var(--surface-alt); }
+.pie-legend-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+.pie-legend-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+.pie-legend-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.pie-legend-num,
+.pie-legend-pct {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pie-legend-pct { width: 4.5em; text-align: right; }
+
+.pie-legend-row.is-off .pie-legend-name { color: var(--text-muted); }
+.pie-legend-row.is-off .pie-legend-num,
+.pie-legend-row.is-off .pie-legend-pct { opacity: 0.45; }
+
+.stats-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.stats-card-head .card-title { margin: 0; }
+
+.meta-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: var(--space-2);
+}
+
+.meta-line .banner { flex: 1 1 100%; margin-bottom: 0; }
+
+.badge-approx {
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
 .dist-controls {
   display: flex;
   align-items: center;

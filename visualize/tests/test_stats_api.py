@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from app.services import stats_service
+
 MANIFEST = json.loads(
     (Path(__file__).resolve().parent.parent / "scripts" / "seed_manifest.json").read_text(
         encoding="utf-8"
@@ -41,6 +43,8 @@ def test_datasets_totals_and_pies_match_manifest(client):
     assert body["totals"]["lerobots"] == total_lerobots == 50
     assert body["totals"]["episodes"] == total_episodes == 500
     assert body["totals"]["hours"] == pytest.approx(TOTAL_DURATION_S / 3600)
+    assert body["sampled"] is False, "small mock tables must aggregate exactly"
+    assert body["sample_pct"] is None
 
     # pie name -> (manifest field giving the per-dataset value, pie total)
     pies = {
@@ -97,6 +101,8 @@ def test_distribution_has_wrist_cam_matches_manifest(client):
     expected = {b["value"]: b for b in DISTRIBUTIONS["has_wrist_cam"]}
     assert len(body["items"]) == len(expected) == 2
     assert body["other"] is None
+    assert body["sampled"] is False
+    assert body["sample_pct"] is None
 
     total_rows = sum(b["rows"] for b in expected.values())
     total_hours = sum(b["sum_duration_s"] for b in expected.values()) / 3600
@@ -224,3 +230,73 @@ def test_distribution_caches_and_refresh_repopulates(client):
     # and the refreshed entry is what subsequent plain calls see
     fourth = client.get(DIST_URL, params=params)
     assert datetime.fromisoformat(fourth.json()["cached_at"]) == cached_at_3
+
+
+# ---------------------------------------------------------------------------
+# One scan per column: weight/top_k slice the same cached bucket list
+# ---------------------------------------------------------------------------
+
+
+def test_distribution_weight_and_top_k_share_one_scan(client):
+    column = "s_step_a_v_1_c_label"
+    stats_service.clear_cache()
+    by_rows = client.get(
+        DIST_URL, params={"column": column, "weight": "rows", "top_k": 2}
+    )
+    by_hours = client.get(
+        DIST_URL, params={"column": column, "weight": "hours", "top_k": 5}
+    )
+    assert by_rows.status_code == 200
+    assert by_hours.status_code == 200
+
+    # both responses are served from one per-column bucket cache entry,
+    # so switching weight / top_k must not re-run the aggregation
+    assert by_rows.json()["cached_at"] == by_hours.json()["cached_at"]
+    assert len(by_rows.json()["items"]) == 2
+    assert len(by_hours.json()["items"]) == 4
+    assert by_hours.json()["other"] is None
+
+
+# ---------------------------------------------------------------------------
+# TABLESAMPLE path for big tables (mocked by lowering the size threshold)
+# ---------------------------------------------------------------------------
+
+
+def test_distribution_samples_big_tables_with_scaled_counts(client, monkeypatch):
+    monkeypatch.setattr(stats_service, "SAMPLE_THRESHOLD_ROWS", 0)
+    stats_service.clear_cache()
+    response = client.get(DIST_URL, params={"column": "has_wrist_cam"})
+    assert response.status_code == 200
+    body = response.json()
+
+    # 500-row mock table -> pct clamps to 100% -> full sample == exact numbers
+    assert body["sampled"] is True
+    assert body["sample_pct"] == 100.0
+    assert body["total_rows"] == 500
+    expected = {b["value"]: b for b in DISTRIBUTIONS["has_wrist_cam"]}
+    items = {item["value"]: item for item in body["items"]}
+    for value, bucket in expected.items():
+        assert items[value]["rows"] == bucket["rows"]
+
+    # refresh=1 forces an exact (unsampled) full-scan recomputation
+    refreshed = client.get(
+        DIST_URL, params={"column": "has_wrist_cam", "refresh": 1}
+    ).json()
+    assert refreshed["sampled"] is False
+    assert refreshed["sample_pct"] is None
+    assert refreshed["total_rows"] == 500
+
+
+def test_dataset_stats_hours_sampled_on_big_tables(client, monkeypatch):
+    monkeypatch.setattr(stats_service, "SAMPLE_THRESHOLD_ROWS", 0)
+    stats_service.clear_cache()
+    response = client.get(DATASET_URL)
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["sampled"] is True
+    assert body["sample_pct"] == 100.0
+    # counts stay exact (small tables); hours come from a 100% sample
+    assert body["totals"]["lerobots"] == 50
+    assert body["totals"]["episodes"] == 500
+    assert body["totals"]["hours"] == pytest.approx(TOTAL_DURATION_S / 3600)

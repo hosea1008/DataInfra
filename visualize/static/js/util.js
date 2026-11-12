@@ -61,6 +61,16 @@ export function fmtPct(r) {
   return `${(Number(r) * 100).toFixed(1)}%`;
 }
 
+/** Big number -> compact zh units: 12345 -> "1.2万", 3.4e8 -> "3.4亿". */
+export function fmtCompact(n) {
+  const v = Number(n);
+  if (n === null || n === undefined || Number.isNaN(v)) return "-";
+  const trim = (x) => String(parseFloat(x.toFixed(1)));
+  if (Math.abs(v) < 1e4) return String(Math.round(v));
+  if (Math.abs(v) < 1e8) return `${trim(v / 1e4)}万`;
+  return `${trim(v / 1e8)}亿`;
+}
+
 /** ISO datetime -> localized string; null -> "-". */
 export function fmtDateTime(s) {
   if (!s) return "-";
