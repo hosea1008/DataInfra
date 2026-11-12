@@ -179,3 +179,23 @@ class ResetExecuteResponse(BaseModel):
     created_tables: list[str] = Field(default_factory=list)
     copied: dict[str, int] = Field(default_factory=dict)
     status_statistic: dict[str, int] | None = None
+
+
+class DatasetPathLink(BaseModel):
+    path: str
+    target: str
+
+
+class DatasetPathItem(BaseModel):
+    dataset_name: str | None = None
+    sample_count: int
+    dataset_path: str | None = None
+    resolved_path: str | None = None
+    links: list[DatasetPathLink] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DatasetPathsResponse(BaseModel):
+    cached_at: datetime
+    sample_size: int = 20
+    items: list[DatasetPathItem] = Field(default_factory=list)

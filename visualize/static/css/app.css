@@ -769,3 +769,16 @@ label { cursor: pointer; }
   .seg-toggle button { min-height: 40px; }
   .btn { min-height: 40px; }
 }
+
+
+/* Dataset path inventory: wrap full paths; keep large inventories scrollable. */
+.dataset-path-scroll { max-height: 560px; overflow: auto; margin-top: 12px; }
+.dataset-path-table { width: 100%; min-width: 850px; table-layout: fixed; }
+.dataset-path-table th { position: sticky; top: 0; z-index: 1; }
+.dataset-path-table th:nth-child(1) { width: 15%; }
+.dataset-path-table th:nth-child(2) { width: 6%; }
+.dataset-path-table th:nth-child(3) { width: 24%; }
+.dataset-path-table th:nth-child(4) { width: 35%; }
+.dataset-path-table td { vertical-align: top; overflow-wrap: anywhere; }
+.dataset-path-value { font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dataset-path-value + .dataset-path-value { margin-top: 8px; }

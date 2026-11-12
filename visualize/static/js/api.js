@@ -89,6 +89,9 @@ export const api = {
     ),
 
   /** GET /api/stats/columns -> {columns:[{name,kind,note}]} */
+  datasetPaths: (refresh = false) =>
+    request("/api/stats/dataset-paths" + qs({ refresh: refresh ? 1 : 0 })),
+
   statsColumns: () => request("/api/stats/columns"),
 
   /**

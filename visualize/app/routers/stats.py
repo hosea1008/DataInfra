@@ -17,7 +17,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.db import PoolManager
 from app.schemas import ColumnDistResponse, ColumnListResponse, DatasetStatsResponse
-from app.services import stats_service
+from app.services import stats_service, dataset_path_service
+from app.schemas import DatasetPathsResponse
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -70,3 +71,9 @@ def column_distribution(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/dataset-paths", response_model=DatasetPathsResponse)
+def dataset_paths(request: Request, refresh: bool = False) -> DatasetPathsResponse:
+    """Sample production status paths, cached for 600 s; refresh re-samples."""
+    return dataset_path_service.get_dataset_paths(request.app.state.pools, refresh)

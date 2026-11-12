@@ -2,6 +2,7 @@
  * view_stats.js — 数据统计 tab (production only).
  * 3 dataset pie cards (lerobot数 / episode数 / 总时长) + column-distribution card.
  */
+import { datasetPathsCard } from "./view_dataset_paths.js";
 import { api } from "./api.js";
 import {
   el,
@@ -491,7 +492,8 @@ export function activate(root) {
       ),
       distBox,
       distMeta
-    )
+    ),
+    datasetPathsCard()
   );
 
   loadPies();
