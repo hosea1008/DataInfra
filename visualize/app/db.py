@@ -13,8 +13,10 @@ the PoolManager itself stays usable - the other env is unaffected and
 :meth:`PoolManager.health_check` reports the env as down.
 
 Session options applied per env:
-- production: ``statement_timeout=30000`` and ``default_transaction_read_only=on``
-  (hard read-only policy at the session level, on top of the read-only user).
+- production: ``statement_timeout=300000`` and ``default_transaction_read_only=on``
+  (hard read-only policy at the session level, on top of the read-only user;
+  the 300 s budget lets full-table GROUP BY statistics over the tens-of-millions
+  ``data`` table finish instead of being cancelled).
 - test: ``statement_timeout=300000``.
 """
 
@@ -35,7 +37,7 @@ MAX_CONN = 5
 
 # env -> libpq `options` startup parameter
 _ENV_OPTIONS = {
-    "production": "-c statement_timeout=30000 -c default_transaction_read_only=on",
+    "production": "-c statement_timeout=300000 -c default_transaction_read_only=on",
     "test": "-c statement_timeout=300000",
 }
 

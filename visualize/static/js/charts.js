@@ -20,10 +20,12 @@ window.addEventListener("resize", () => {
  * Render (or re-render) a pie chart into `dom`.
  * Any previous chart bound to `dom` is disposed first.
  *
- * data: [{name, value, meta?}]  — meta is passed through to the tooltip formatter.
+ * data: [{name, value, ratio?, meta?}]  — meta is passed through to the tooltip formatter.
  * tooltipFormatter(params) -> HTML string.
+ * legendFormatter(item) -> string, optional; item is the data entry for the
+ * legend name. Defaults to "name (pct%)".
  */
-export function renderPie(dom, { data, tooltipFormatter, legendType = "scroll" }) {
+export function renderPie(dom, { data, tooltipFormatter, legendFormatter, legendType = "scroll" }) {
   if (!window.echarts) {
     throw new Error("ECharts 未加载");
   }
@@ -44,13 +46,15 @@ export function renderPie(dom, { data, tooltipFormatter, legendType = "scroll" }
     },
     legend: {
       type: legendType,
-      orient: "horizontal",
-      bottom: 0,
-      left: "center",
+      orient: "vertical",
+      right: 0,
+      top: "middle",
       formatter: (name) => {
         const item = data.find((d) => d.name === name);
-        const pct = item && item.ratio != null ? ` ${(item.ratio * 100).toFixed(1)}%` : "";
-        return `${name}${pct}`;
+        if (!item) return name;
+        if (legendFormatter) return legendFormatter(item);
+        const pct = item.ratio != null ? ` ${(item.ratio * 100).toFixed(1)}%` : "";
+        return `${item.name}${pct}`;
       },
       textStyle: { fontSize: 12 },
     },
@@ -58,7 +62,7 @@ export function renderPie(dom, { data, tooltipFormatter, legendType = "scroll" }
       {
         type: "pie",
         radius: ["38%", "68%"],
-        center: ["50%", "44%"],
+        center: ["32%", "50%"],
         avoidLabelOverlap: true,
         labelLayout: { hideOverlap: true },
         itemStyle: { borderColor: "#fff", borderWidth: 1 },

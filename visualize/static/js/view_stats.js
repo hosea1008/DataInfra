@@ -42,6 +42,14 @@ function pieTooltip(unitKind) {
   };
 }
 
+function legendText(unitKind) {
+  return (it) => {
+    const value = unitKind === "hours" ? `${fmtHours(it.value)}h` : fmtInt(it.value);
+    const pct = it.ratio != null ? `${(it.ratio * 100).toFixed(1)}%` : "-";
+    return `${it.name} ${value} (${pct})`;
+  };
+}
+
 function toPieData(items) {
   return (items || []).map((it) => ({
     name: it.dataset_name == null ? "NULL" : String(it.dataset_name),
@@ -80,6 +88,7 @@ async function loadPies() {
       renderPie(canvas, {
         data: pieData,
         tooltipFormatter: pieTooltip(spec.unit),
+        legendFormatter: legendText(spec.unit),
       });
     }
     replaceChildren(
@@ -141,7 +150,11 @@ async function loadDistribution() {
     } else {
       const canvas = el("div", { class: "dist-canvas" });
       replaceChildren(distBox, canvas);
-      renderPie(canvas, { data: items, tooltipFormatter: distTooltip });
+      renderPie(canvas, {
+        data: items,
+        tooltipFormatter: distTooltip,
+        legendFormatter: legendText(useHours ? "hours" : "count"),
+      });
     }
     replaceChildren(
       distMeta,

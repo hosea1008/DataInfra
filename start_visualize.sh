@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start_visualize.sh - (re)start the visualize FastAPI service (uvicorn, port 8080).
+# start_visualize.sh - (re)start the visualize FastAPI service (uvicorn, port 8899).
 # Idempotent: stops a previously started instance (tracked via pid file) first.
 # NOTE: VISUALIZE_DBINFO (if exported by the caller) is inherited by the
 # nohup'd process automatically; this script never sets or unsets it.
@@ -40,14 +40,14 @@ fi
 # --- Start -----------------------------------------------------------------
 # Launch from $ROOT so uvicorn's --app-dir relative layout is unambiguous.
 cd "$ROOT"
-nohup python -m uvicorn app.main:app --app-dir "$ROOT/visualize" --host 0.0.0.0 --port 8080 >> "$LOG_FILE" 2>&1 &
+nohup python -m uvicorn app.main:app --app-dir "$ROOT/visualize" --host 0.0.0.0 --port 8899 >> "$LOG_FILE" 2>&1 &
 PID="$!"
 echo "$PID" > "$PID_FILE"
 
 # --- Health wait ------------------------------------------------------------
 for _ in $(seq 1 20); do
-    if curl -sf http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
-        echo "visualize service started (pid $PID, port 8080)"
+    if curl -sf http://127.0.0.1:8899/api/health >/dev/null 2>&1; then
+        echo "visualize service started (pid $PID, port 8899)"
         exit 0
     fi
     sleep 1
