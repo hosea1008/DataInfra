@@ -20,16 +20,18 @@
     </div>
   </div>
   <nav class="tab-nav" id="tab-nav" role="tablist">
-    <button class="tab-btn is-active" data-tab="versions" type="button" role="tab" aria-selected="true">版本进度</button>
+    <button class="tab-btn is-active" data-tab="stats" type="button" role="tab" aria-selected="true">数据统计</button>
+    <button class="tab-btn" data-tab="paths" type="button" role="tab" aria-selected="false">数据集存储路径</button>
+    <button class="tab-btn" data-tab="versions" type="button" role="tab" aria-selected="false">版本进度</button>
     <button class="tab-btn" data-tab="tables" type="button" role="tab" aria-selected="false">表预览</button>
-    <button class="tab-btn" data-tab="stats" type="button" role="tab" aria-selected="false">数据统计</button>
     <button class="tab-btn" data-tab="reset" type="button" role="tab" aria-selected="false">重置测试环境</button>
   </nav>
 </header>
 <main class="app-main">
-  <section id="tab-versions" class="tab-panel is-active" aria-label="版本进度"></section>
+  <section id="tab-versions" class="tab-panel" aria-label="版本进度"></section>
   <section id="tab-tables" class="tab-panel" aria-label="表预览"></section>
-  <section id="tab-stats" class="tab-panel" aria-label="数据统计"></section>
+  <section id="tab-stats" class="tab-panel is-active" aria-label="数据统计"></section>
+  <section id="tab-paths" class="tab-panel" aria-label="数据集存储路径"></section>
   <section id="tab-reset" class="tab-panel" aria-label="重置测试环境"></section>
 </main>
 <script src="/vendor/echarts.min.js"></script>

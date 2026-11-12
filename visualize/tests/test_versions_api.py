@@ -1,12 +1,17 @@
-"""Tests for GET /api/envs/{env}/versions/progress (version-progress feature).
+"""Version progress API tests against the seeded mock PostgreSQL databases."""
 
-Value assertions run against the production mock DB only (ground truth:
-visualize/scripts/seed_manifest.json - status_statistic is a single row with
-download_finish=50, register_finish=46, s_step_a_v_1=24, s_step_a_v_2=11,
-s_step_b_v_1=10; status holds 50 rows). The test env's tables are volatile
-(a parallel reset task drops/recreates them), so the test-env case only
-accepts 200 or 404.
-"""
+import json
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+import psycopg2
+from psycopg2.extras import DictCursor
+
+from app.config import get_conn_params
+from app.services.version_service import _compute_durations
+
+MANIFEST = json.loads((Path(__file__).resolve().parents[1] / "scripts/seed_manifest.json").read_text())
 
 PROD_URL = "/api/envs/production/versions/progress"
 TEST_URL = "/api/envs/test/versions/progress"
@@ -22,9 +27,6 @@ EXPECTED_COUNTS = {
 EXPECTED_RATIOS = {
     "download_finish": 1.0,
     "register_finish": 0.92,
-    "s_step_a_v_1": 0.48,
-    "s_step_a_v_2": 0.22,
-    "s_step_b_v_1": 0.2,
 }
 
 
@@ -68,12 +70,19 @@ def test_progress_production_items_unpivoted(client):
     assert set(items) == set(EXPECTED_COUNTS)
     for key, count in EXPECTED_COUNTS.items():
         assert items[key]["count"] == count
-        assert items[key]["ratio"] == EXPECTED_RATIOS[key]
+    for key, ratio in EXPECTED_RATIOS.items():
+        assert items[key]["ratio"] == ratio
 
     item = items["s_step_a_v_1"]
     assert item["step_key"] == "step_a"
     assert item["version_no"] == 1
-    assert item["ratio"] == 0.48
+    total_s = sum(dataset["total_duration_s"] for dataset in MANIFEST["datasets"])
+    null_bucket = next(b for b in MANIFEST["distributions"]["s_step_a_v_1_c_label"] if b["value"] is None)
+    completed_s = total_s - null_bucket["sum_duration_s"]
+    assert item["completed_hours"] == pytest.approx(completed_s / 3600)
+    assert item["total_hours"] == pytest.approx(total_s / 3600)
+    assert item["ratio"] == pytest.approx(round(completed_s / total_s, 6))
+    assert item["progress_kind"] == "hours"
     assert item["step_explain"] == "示例步骤A：质量打分"
     assert item["version_note"] == "v1：初版打分"
 
@@ -82,6 +91,7 @@ def test_progress_production_items_unpivoted(client):
     assert download["version_no"] is None
     assert download["step_explain"] is None
     assert download["version_note"] is None
+    assert download["progress_kind"] == "count"
 
 
 def test_progress_keys_filter(client):
@@ -93,8 +103,10 @@ def test_progress_keys_filter(client):
     items = _by_key(body["items"])
     assert set(items) == {"s_step_a_v_2", "s_step_b_v_1"}
     assert items["s_step_a_v_2"]["count"] == 11
+    assert items["s_step_a_v_2"]["completed_hours"] is not None
     assert items["s_step_a_v_2"]["version_note"] == "v2：打分算法升级"
     assert items["s_step_b_v_1"]["count"] == 10
+    assert items["s_step_b_v_1"]["completed_hours"] is not None
     assert items["s_step_b_v_1"]["step_explain"] == "示例步骤B：语义打标"
     assert items["s_step_b_v_1"]["version_note"] == "v1：初版打标"
 
@@ -121,3 +133,37 @@ def test_progress_test_env_200_or_404(client):
     assert response.status_code in (200, 404)
     if response.status_code == 404:
         assert "status_statistic" in response.json()["detail"]
+
+
+def test_version_hours_count_a_row_once_when_any_column_is_present():
+    """A temporary table proves the OR rule without changing persistent data."""
+    class TempPool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        @contextmanager
+        def cursor(self, env, dict_cursor=False):
+            assert env == "test"
+            with self.connection.cursor(cursor_factory=DictCursor) as cur:
+                yield cur
+
+    with psycopg2.connect(**get_conn_params("test")) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TEMP TABLE data (origin_video_duration_s numeric, a numeric, b text)")
+            cur.execute("INSERT INTO data VALUES (3600, 1, NULL), (7200, NULL, 'done'), "
+                        "(10800, 2, 'done'), (14400, NULL, NULL)")
+        result = _compute_durations(TempPool(conn), "test", {"s_demo_v_1": ["a", "b"]})
+    assert result["total_hours"] == 10
+    assert result["hours"]["s_demo_v_1"] == 6
+
+
+def test_exact_duration_cache_and_refresh(client):
+    first = client.get(PROD_URL).json()
+    second = client.get(PROD_URL, params={"keys": "s_step_b_v_1"}).json()
+    assert first["cached_at"] == second["cached_at"]
+    assert second["items"][0]["completed_hours"] == pytest.approx(
+        _by_key(first["items"])["s_step_b_v_1"]["completed_hours"]
+    )
+    refreshed = client.get(PROD_URL, params={"refresh": 1}).json()
+    assert refreshed["cached_at"] >= first["cached_at"]
+    assert refreshed["items"][2]["completed_hours"] == first["items"][2]["completed_hours"]

@@ -19,7 +19,8 @@ VALID_ENVS = ("production", "test")
 
 @router.get("/{env}/versions/progress", response_model=VersionProgressResponse)
 def get_version_progress(
-    request: Request, env: str, keys: str | None = None
+    request: Request, env: str, keys: str | None = None,
+    refresh: bool = False,
 ) -> VersionProgressResponse:
     """Return per-version progress items for ``env`` (optional csv ``keys``)."""
     if env not in VALID_ENVS:
@@ -29,7 +30,7 @@ def get_version_progress(
         )
     try:
         return version_service.build_version_progress(
-            request.app.state.pools, env, keys
+            request.app.state.pools, env, keys, refresh=refresh
         )
     except version_service.InvalidKeysError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

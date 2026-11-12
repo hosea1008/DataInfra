@@ -71,10 +71,11 @@ export const api = {
    * GET /api/envs/{env}/versions/progress?keys=a,b
    * keys: array of strings; empty/undefined -> omit param (server returns all).
    */
-  versionProgress: (env, keys) =>
+  versionProgress: (env, keys, { refresh = false } = {}) =>
     request(
       `/api/envs/${encodeURIComponent(env)}/versions/progress` +
-        qs({ keys: Array.isArray(keys) && keys.length ? keys.join(",") : undefined })
+        qs({ keys: Array.isArray(keys) && keys.length ? keys.join(",") : undefined,
+          refresh: refresh ? 1 : 0 })
     ),
 
   /**

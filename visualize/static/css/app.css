@@ -771,14 +771,21 @@ label { cursor: pointer; }
 }
 
 
-/* Dataset path inventory: wrap full paths; keep large inventories scrollable. */
-.dataset-path-scroll { max-height: 560px; overflow: auto; margin-top: 12px; }
-.dataset-path-table { width: 100%; min-width: 850px; table-layout: fixed; }
+/* Dataset paths are shown in full and wrap at directory boundaries. */
+.dataset-path-scroll { max-height: 640px; max-width: 100%; overflow: auto; margin-top: 12px; }
+.dataset-path-table { width: 100%; min-width: 980px; table-layout: fixed; }
 .dataset-path-table th { position: sticky; top: 0; z-index: 1; }
-.dataset-path-table th:nth-child(1) { width: 15%; }
-.dataset-path-table th:nth-child(2) { width: 6%; }
-.dataset-path-table th:nth-child(3) { width: 24%; }
-.dataset-path-table th:nth-child(4) { width: 35%; }
+.dataset-path-table th:nth-child(1) { width: 14%; }
+.dataset-path-table th:nth-child(2) { width: 7%; }
+.dataset-path-table th:nth-child(3) { width: 28%; }
+.dataset-path-table th:nth-child(4) { width: 37%; }
+.dataset-path-table th:nth-child(5) { width: 14%; }
 .dataset-path-table td { vertical-align: top; overflow-wrap: anywhere; }
-.dataset-path-value { font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.dataset-path-value + .dataset-path-value { margin-top: 8px; }
+.dataset-path-table tbody tr:hover { background: var(--surface-alt); }
+.dataset-path-chain { display: grid; gap: 8px; }
+.dataset-path-link { border-left: 2px solid var(--primary); padding-left: 10px; }
+.dataset-path-block { min-width: 0; padding: 7px 9px; background: var(--surface-alt); border-radius: var(--radius-sm); }
+.dataset-path-block + .dataset-path-block { margin-top: 5px; }
+.dataset-path-label { display: block; color: var(--text-muted); font-size: 11px; margin-bottom: 3px; }
+.dataset-path-text { display: inline; font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; word-break: normal; user-select: text; }
+.dataset-path-unresolved { color: var(--warning); }

@@ -3,7 +3,24 @@ import { api } from "./api.js";
 import { el, replaceChildren, fmtDateTime } from "./util.js";
 import { loadingBlock, errorBanner, emptyState } from "./components.js";
 
-export function datasetPathsCard() {
+/** Keep the complete path visible, with natural line breaks after separators. */
+function pathText(value) {
+  const span = el("span", { class: "dataset-path-text", title: value });
+  const parts = String(value).split("/");
+  parts.forEach((part, index) => {
+    if (index) span.append("/", el("wbr"));
+    span.append(part);
+  });
+  return span;
+}
+
+function pathBlock(label, path) {
+  return el("div", { class: "dataset-path-block" },
+    el("span", { class: "dataset-path-label" }, label),
+    pathText(path));
+}
+
+function datasetPathsCard() {
   const body = el("div");
   const meta = el("div", { class: "meta-line" });
   const search = el("input", { type: "search", placeholder: "筛选数据集或路径", "aria-label": "筛选数据集路径" });
@@ -16,16 +33,20 @@ export function datasetPathsCard() {
       return;
     }
     const rows = filtered.map((item) => {
-      const chain = el("div");
-      for (const link of item.links) {
-        chain.appendChild(el("div", { class: "dataset-path-value" }, `${link.path} → ${link.target}`));
+      const chain = el("div", { class: "dataset-path-chain" });
+      for (const [index, link] of item.links.entries()) {
+        chain.appendChild(el("div", { class: "dataset-path-link" },
+          el("span", { class: "dataset-path-label" }, `第 ${index + 1} 层软链接`),
+          pathBlock("链接", link.path),
+          pathBlock("指向", link.target)));
       }
-      chain.appendChild(el("div", { class: "dataset-path-value" },
-        item.resolved_path ? `真实目录：${item.resolved_path}` : "真实目录：无法确认"));
+      chain.appendChild(item.resolved_path
+        ? pathBlock("真实目录", item.resolved_path)
+        : el("span", { class: "dataset-path-unresolved" }, "真实目录无法确认"));
       return el("tr", {},
         el("td", {}, item.dataset_name ?? "NULL"),
         el("td", {}, String(item.sample_count)),
-        el("td", { class: "dataset-path-value" }, item.dataset_path ?? "—"),
+        el("td", {}, item.dataset_path ? pathBlock("数据库路径", item.dataset_path) : "—"),
         el("td", {}, chain),
         el("td", {}, item.warnings.length ? item.warnings.join("；") : (item.links.length ? "已解析软链接" : "真实目录")));
     });
@@ -55,4 +76,9 @@ export function datasetPathsCard() {
     search, meta, body);
   load();
   return card;
+}
+
+export function activate(root) {
+  if (root.firstChild) return;
+  replaceChildren(root, datasetPathsCard());
 }

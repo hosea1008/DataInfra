@@ -69,7 +69,7 @@ async function loadDatasets() {
     state.datasets = data.datasets || [];
     state.defaultN = data.default_n ?? 10;
     state.n = state.defaultN;
-    state.selected = new Set(state.datasets.map((d) => d.dataset_name));
+    state.selected = new Set();
     renderStep1();
   } catch (err) {
     replaceChildren(stepBox, errorBanner(err));

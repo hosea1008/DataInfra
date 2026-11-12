@@ -3,7 +3,7 @@
  * Env toggle + key checkbox filter (refetch with ?keys= on change) + progress bars.
  */
 import { api } from "./api.js";
-import { el, replaceChildren, fmtInt, fmtPct } from "./util.js";
+import { el, replaceChildren, fmtInt, fmtHours, fmtPct, fmtDateTime } from "./util.js";
 import {
   segToggle,
   checkboxGroup,
@@ -29,6 +29,8 @@ let rootEl = null;
 let filterBox = null;
 let contentBox = null;
 let toggle = null;
+let metaBox = null;
+let refreshBtn = null;
 
 function keyLabel(info) {
   if (BUILTIN_LABELS[info.key]) return BUILTIN_LABELS[info.key];
@@ -66,6 +68,9 @@ function renderItems(data) {
     return;
   }
   const total = data.total_lerobots;
+  metaBox.textContent = data.cached_at
+    ? `时长统计：精确计算 · 缓存时间：${fmtDateTime(data.cached_at)}；无时长或无版本列时无法计算进度。`
+    : "";
   replaceChildren(
     contentBox,
     el(
@@ -84,7 +89,9 @@ function renderItems(data) {
             el(
               "span",
               { class: "progress-item-nums" },
-              `${fmtInt(item.count)} / ${fmtInt(total)} · ${fmtPct(item.ratio)}`
+              item.progress_kind === "hours"
+                ? `${fmtHours(item.completed_hours)} / ${fmtHours(item.total_hours)} 小时 · ${fmtPct(item.ratio)}`
+                : `${fmtInt(item.count)} / ${fmtInt(total)} · ${fmtPct(item.ratio)}`
             )
           ),
           sub ? el("div", { class: "progress-item-sub" }, sub) : null,
@@ -106,7 +113,8 @@ function renderItems(data) {
   );
 }
 
-async function load() {
+async function load(refresh = false) {
+  refreshBtn.disabled = true;
   replaceChildren(contentBox, loadingBlock("加载版本进度…"));
   const keys =
     state.selectionTouched && state.selected.size < state.available.length
@@ -114,10 +122,13 @@ async function load() {
       : undefined;
   if (state.selectionTouched && state.selected.size === 0) {
     replaceChildren(contentBox, emptyState("请至少勾选一个统计项"));
+    refreshBtn.disabled = false;
     return;
   }
   try {
-    const data = await api.versionProgress(state.env, keys);
+    const data = await api.versionProgress(state.env, keys, {
+      refresh,
+    });
     // Refresh the checkbox inventory whenever the server sends one.
     if (Array.isArray(data.available)) {
       const prevKeys = state.available.map((a) => a.key).join(",");
@@ -140,6 +151,8 @@ async function load() {
     } else {
       replaceChildren(contentBox, errorBanner(err));
     }
+  } finally {
+    refreshBtn.disabled = false;
   }
 }
 
@@ -166,11 +179,16 @@ export function activate(root) {
 
   filterBox = el("div", { class: "card" }, el("h3", { class: "card-title" }, "统计项筛选"));
   contentBox = el("div", { class: "card" }, el("h3", { class: "card-title" }, "进度详情"));
+  metaBox = el("div", { class: "meta-line" });
+  refreshBtn = el("button", { class: "btn", type: "button",
+    title: "重新扫描 data 表并更新精确结果，可能需要数分钟", onclick: () => load(true) }, "刷新时长进度");
 
   replaceChildren(
     rootEl,
-    el("div", { class: "card toolbar" }, el("span", { class: "control-label" }, "环境："), toggle.element),
+    el("div", { class: "card toolbar" }, el("span", { class: "control-label" }, "环境："), toggle.element,
+      refreshBtn),
     filterBox,
+    metaBox,
     contentBox
   );
   load();

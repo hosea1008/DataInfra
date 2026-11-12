@@ -5,12 +5,14 @@ import { api } from "./api.js";
 import * as versionsView from "./view_versions.js";
 import * as tablesView from "./view_tables.js";
 import * as statsView from "./view_stats.js";
+import * as datasetPathsView from "./view_dataset_paths.js";
 import * as resetView from "./view_reset.js";
 
 const VIEWS = {
   versions: versionsView,
   tables: tablesView,
   stats: statsView,
+  paths: datasetPathsView,
   reset: resetView,
 };
 
@@ -36,7 +38,7 @@ function initTabs() {
     if (btn) switchTab(btn.dataset.tab);
   });
   const fromHash = (location.hash || "").replace("#", "");
-  switchTab(VIEWS[fromHash] ? fromHash : "versions");
+  switchTab(VIEWS[fromHash] ? fromHash : "stats");
 }
 
 function setHealth(envKey, ok) {

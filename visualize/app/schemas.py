@@ -111,6 +111,9 @@ class VersionProgressItem(BaseModel):
     step_key: str | None = None
     version_no: int | None = None
     count: int | None = None
+    completed_hours: float | None = None
+    total_hours: float | None = None
+    progress_kind: str = "count"
     ratio: float | None = None
     step_explain: str | None = None
     version_note: str | None = None
@@ -127,6 +130,7 @@ class VersionKeyInfo(BaseModel):
 class VersionProgressResponse(BaseModel):
     env: str
     total_lerobots: int | None = None
+    cached_at: datetime | None = None
     available: list[VersionKeyInfo] = Field(default_factory=list)
     items: list[VersionProgressItem] = Field(default_factory=list)
 

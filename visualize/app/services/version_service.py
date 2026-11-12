@@ -1,25 +1,23 @@
-"""Version-progress service: unpivot status_statistic into per-version items.
+"""Version progress: builtin counts from status_statistic, version hours from data.
 
-The ``status_statistic`` table holds EXACTLY ONE row whose columns are
-progress counters: builtin counters (``download_finish``, ``register_finish``)
-plus one column per scored version named ``s_<step_key>_v_<version_no>``.
-This service reads that row and returns one progress item per column, with
-``step_explain`` / ``version_note`` joined from the metadata tables.
-
-All SQL lives here. Statistic columns are whitelisted through
-``fetch_table_columns`` (pg_catalog) and the row is read with ``SELECT *`` -
-no user input is ever interpolated into SQL. The ``total_lerobots`` count
-(``COUNT(*) FROM status``) is cached per env in a small thread-safe TTL cache.
+Each version's live columns come from version_info joined to column_info.
+One exact aggregate scan of data computes total duration and every version's
+duration (any one column populated); the result is cached for ten minutes and
+can be manually refreshed. Filtering the visible keys reuses that same scan.
 """
 
 import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
+
+from psycopg2 import sql
 
 from app.db import PoolManager
 from app.schemas import VersionKeyInfo, VersionProgressItem, VersionProgressResponse
-from app.sqlutil import fetch_table_columns, validate_identifier
+from app.sqlutil import fetch_table_columns, qident, validate_identifier
+from app.services.stats_service import TTLCache, _singleflight
 
 STATISTIC_TABLE = "status_statistic"
 STATUS_TABLE = "status"
@@ -90,6 +88,71 @@ class _TtlCache:
 
 
 _total_lerobots_cache = _TtlCache(TOTAL_CACHE_TTL_S)
+_duration_cache = TTLCache()
+
+
+def _version_columns(cur, version_keys: list[str]) -> dict[str, list[str]]:
+    """Use version metadata, keeping only live data columns for safe SQL."""
+    if not version_keys:
+        return {}
+    if not fetch_table_columns(cur, VERSION_INFO_TABLE) or not fetch_table_columns(cur, "column_info"):
+        return {key: [] for key in version_keys}
+    cur.execute(
+        "SELECT v.version_key, c.column_key FROM version_info v "
+        "LEFT JOIN column_info c ON c.step_key = v.step_key "
+        "AND c.version_no = v.version_no "
+        "WHERE v.version_key = ANY(%s)", (version_keys,)
+    )
+    metadata_rows = cur.fetchall()
+    live = set(fetch_table_columns(cur, "data"))
+    result = {key: [] for key in version_keys}
+    for row in metadata_rows:
+        key, column = row["version_key"], row["column_key"]
+        # The prefix also guards against inconsistent version/column metadata.
+        if column in live and column.startswith(key + "_c_"):
+            result[key].append(column)
+    return {key: sorted(set(columns)) for key, columns in result.items()}
+
+
+def _compute_durations(pools: PoolManager, env: str, columns: dict[str, list[str]]) -> dict:
+    """One exact data scan for total and every version, no row transfer."""
+    with pools.cursor(env, dict_cursor=True) as cur:
+        fields = [sql.SQL("COALESCE(sum(origin_video_duration_s), 0) AS total")]
+        keys = [key for key, cols in columns.items() if cols]
+        for index, key in enumerate(keys):
+            # OR short-circuits on the first populated column; one row is
+            # counted once even when several version columns are populated.
+            condition = sql.SQL(" OR ").join(
+                sql.SQL("{} IS NOT NULL").format(qident(col)) for col in columns[key]
+            )
+            fields.append(sql.SQL("COALESCE(sum(origin_video_duration_s) FILTER (WHERE {}), 0) AS {}")
+                          .format(condition, sql.Identifier(f"v{index}")))
+        query = sql.SQL("SELECT {} FROM data").format(sql.SQL(", ").join(fields))
+        cur.execute(query)
+        row = cur.fetchone()
+    return {
+        "total_hours": float(row["total"] or 0) / 3600,
+        "hours": {key: float(row[f"v{index}"] or 0) / 3600
+                  for index, key in enumerate(keys)},
+        "cached_at": datetime.now(UTC),
+    }
+
+
+def _get_durations(pools: PoolManager, env: str, columns: dict[str, list[str]], *, refresh: bool) -> dict:
+    # The metadata signature forces a new scan when versions or their columns change.
+    key = ("version_durations", env, tuple((k, tuple(v)) for k, v in sorted(columns.items())))
+    if not refresh:
+        hit = _duration_cache.get(key)
+        if hit is not None:
+            return hit
+    with _singleflight(key):
+        if not refresh:
+            hit = _duration_cache.get(key)
+            if hit is not None:
+                return hit
+        result = _compute_durations(pools, env, columns)
+        _duration_cache.set(key, result)
+        return result
 
 
 def _parse_keys_filter(keys_csv: str | None) -> list[str] | None:
@@ -179,7 +242,8 @@ def _count_lerobots(pools: PoolManager, env: str) -> int:
 
 
 def build_version_progress(
-    pools: PoolManager, env: str, keys_csv: str | None
+    pools: PoolManager, env: str, keys_csv: str | None,
+    *, refresh: bool = False,
 ) -> VersionProgressResponse:
     """Build the VersionProgressResponse for ``env``.
 
@@ -222,6 +286,10 @@ def build_version_progress(
             if fetch_table_columns(cur, VERSION_INFO_TABLE)
             else {}
         )
+        version_keys = [info.key for info in available if info.step_key is not None]
+        columns_by_version = _version_columns(cur, version_keys)
+
+    durations = _get_durations(pools, env, columns_by_version, refresh=refresh) if version_keys else None
 
     total_lerobots = _total_lerobots_cache.get_or_load(
         env, lambda: _count_lerobots(pools, env)
@@ -231,7 +299,14 @@ def build_version_progress(
     for key in wanted:
         info = infos[key]
         count = counts.get(key)
-        if count is None:
+        is_version = info.step_key is not None
+        completed_hours = durations["hours"].get(key) if is_version and durations else None
+        total_hours = durations["total_hours"] if is_version and durations else None
+        if is_version and completed_hours is not None and total_hours is not None:
+            ratio = round(completed_hours / total_hours, 6) if total_hours else None
+        elif is_version:
+            ratio = None
+        elif count is None:
             ratio = None
         elif total_lerobots:
             ratio = round(count / total_lerobots, 6)
@@ -243,6 +318,9 @@ def build_version_progress(
                 step_key=info.step_key,
                 version_no=info.version_no,
                 count=count,
+                completed_hours=completed_hours,
+                total_hours=total_hours,
+                progress_kind="hours" if is_version else "count",
                 ratio=ratio,
                 step_explain=step_explains.get(info.step_key),
                 version_note=version_notes.get(key),
@@ -252,6 +330,7 @@ def build_version_progress(
     return VersionProgressResponse(
         env=env,
         total_lerobots=total_lerobots,
+        cached_at=durations["cached_at"] if durations else None,
         available=available,
         items=items,
     )
