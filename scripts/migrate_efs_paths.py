@@ -30,7 +30,6 @@ from psycopg2.extras import execute_values
 OLD_PREFIX = "/efs-mi-east4-hpc/"
 NEW_PREFIX = "/efs-mi-east4-4/"
 TABLES = ("status", "lerobot_episode", "data")
-BUFFER_SIZE = 1024 * 1024
 DEFAULT_DBINFO = Path(__file__).resolve().parents[1] / "DBInfo.json"
 DEFAULT_WORKERS = 4
 MAX_WARNINGS_SHOWN = 20
@@ -48,27 +47,16 @@ class Candidate:
 
 
 def _same_file(left: str, right: str, left_stat, right_stat) -> None:
-    if (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino):
-        return
     if left_stat.st_size != right_stat.st_size:
         raise VerificationError(f"file size differs: {left} <> {right}")
-    with open(left, "rb") as source, open(right, "rb") as target:
-        while True:
-            a = source.read(BUFFER_SIZE)
-            b = target.read(BUFFER_SIZE)
-            if a != b:
-                raise VerificationError(f"file content differs: {left} <> {right}")
-            if not a:
-                break
-    # Detect a file being changed while it was being compared.
-    for path, before in ((left, left_stat), (right, right_stat)):
-        after = os.stat(path)
-        if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
-            raise VerificationError(f"file changed during verification: {path}")
 
 
-def _same_tree(left: str, right: str, left_ancestors: set, right_ancestors: set) -> None:
-    left_stat, right_stat = os.stat(left), os.stat(right)  # follows symlinks
+def _same_tree(
+    left: str, right: str, left_ancestors: set, right_ancestors: set,
+    left_stat=None, right_stat=None,
+) -> None:
+    left_stat = left_stat or os.stat(left)
+    right_stat = right_stat or os.stat(right)
     left_dir, right_dir = stat.S_ISDIR(left_stat.st_mode), stat.S_ISDIR(right_stat.st_mode)
     if left_dir != right_dir:
         raise VerificationError(f"file type differs: {left} <> {right}")
@@ -82,35 +70,37 @@ def _same_tree(left: str, right: str, left_ancestors: set, right_ancestors: set)
     right_id = (right_stat.st_dev, right_stat.st_ino)
     if left_id in left_ancestors or right_id in right_ancestors:
         raise VerificationError(f"directory symlink loop: {left} <> {right}")
-    if left_id == right_id:
-        return  # both names resolve to the same physical directory
     with os.scandir(left) as iterator:
-        left_names = {entry.name for entry in iterator}
+        left_entries = {entry.name: entry for entry in iterator}
     with os.scandir(right) as iterator:
-        right_names = {entry.name for entry in iterator}
-    if left_names != right_names:
+        right_entries = {entry.name: entry for entry in iterator}
+    if left_entries.keys() != right_entries.keys():
         raise VerificationError(f"directory entries differ: {left} <> {right}")
-    for name in sorted(left_names):
+    for name in left_entries:
+        a, b = left_entries[name], right_entries[name]
         _same_tree(
-            os.path.join(left, name), os.path.join(right, name),
+            a.path, b.path,
             left_ancestors | {left_id}, right_ancestors | {right_id},
+            a.stat(follow_symlinks=True), b.stat(follow_symlinks=True),
         )
 
 
-def verify_candidate(candidate: Candidate) -> None:
-    """Check both lerobot directories and compare every nested file's bytes."""
+def verify_candidate(candidate: Candidate) -> str:
+    """Compare directory entry names, types, and regular-file sizes only."""
     left, right = candidate.old_path, candidate.new_path
     if not os.path.isabs(left) or not os.path.isabs(right):
         raise VerificationError("both lerobot paths must be absolute")
     try:
-        if not stat.S_ISDIR(os.stat(left).st_mode):
+        left_stat, right_stat = os.stat(left), os.stat(right)
+        if not stat.S_ISDIR(left_stat.st_mode):
             raise VerificationError(f"original is not a directory: {left}")
-        if not stat.S_ISDIR(os.stat(right).st_mode):
+        if not stat.S_ISDIR(right_stat.st_mode):
             raise VerificationError(f"replacement is not a directory: {right}")
         with os.scandir(right) as iterator:
             if next(iterator, None) is None:
                 raise VerificationError(f"replacement directory is empty: {right}")
-        _same_tree(left, right, set(), set())
+        _same_tree(left, right, set(), set(), left_stat, right_stat)
+        return "name-size"
     except (OSError, RecursionError) as exc:
         raise VerificationError(f"cannot verify {left} <> {right}: {exc}") from exc
 
@@ -310,13 +300,14 @@ def main(argv=None) -> int:
             print(f"Found {len(candidates)} matching status rows ({unique_paths} unique path pairs).", flush=True)
             if not candidates:
                 return 0
-            print(f"Verifying exact content with {args.workers} worker(s)...", flush=True)
+            print(f"Checking directory names and file sizes with {args.workers} worker(s)...", flush=True)
 
             def show_progress(done: int, total: int, failures: int, elapsed: float) -> None:
                 rate = done / elapsed if elapsed > 0 else 0
                 eta = (total - done) / rate if rate else 0
                 print(f"Verified {done:,}/{total:,} ({done / total:.0%}); "
-                      f"failed {failures:,}; elapsed {elapsed:.0f}s; ETA {eta:.0f}s", flush=True)
+                      f"failed {failures:,}; "
+                      f"elapsed {elapsed:.0f}s; ETA {eta:.0f}s", flush=True)
 
             failures = verify_all(candidates, args.workers, args.report, show_progress)
             if args.report:

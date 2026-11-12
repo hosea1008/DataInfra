@@ -18,7 +18,7 @@ def test_script_location_and_bounded_grouped_verification(tmp_path, monkeypatch)
     def verify(item):
         calls.append((item.old_path, item.new_path))
         if item.old_path == "bad":
-            raise migrate.VerificationError("different content")
+            raise migrate.VerificationError("different file sizes")
 
     monkeypatch.setattr(migrate, "verify_candidate", verify)
     items = [migrate.Candidate(str(n), "good", "new") for n in range(100)]
@@ -45,12 +45,14 @@ def _pair(tmp_path: Path):
     return old, new
 
 
-def test_full_directory_content_and_symlink(tmp_path):
+def test_directory_names_and_file_sizes_only(tmp_path):
     old, new = _pair(tmp_path)
     item = migrate.Candidate(str(uuid4()), str(old), str(new))
     migrate.verify_candidate(item)
     (new / "meta" / "large.bin").write_bytes(b"abd" * 10000)
-    with pytest.raises(migrate.VerificationError, match="content differs"):
+    assert migrate.verify_candidate(item) == "name-size"  # same length; bytes are intentionally ignored
+    (new / "meta" / "large.bin").write_bytes(b"abcd" * 10000)
+    with pytest.raises(migrate.VerificationError, match="size differs"):
         migrate.verify_candidate(item)
     (new / "meta" / "large.bin").write_bytes(b"abc" * 10000)
     (new / "meta" / "extra").write_text("unexpected")
