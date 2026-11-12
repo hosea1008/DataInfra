@@ -1,0 +1,16 @@
+{
+    "production_env": {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "user": "postgres",
+        "password": "postgres",
+        "dbname": "visualize_mock_prod"
+    },
+    "test_env": {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "user": "postgres",
+        "password": "postgres",
+        "dbname": "visualize_mock_test"
+    }
+}

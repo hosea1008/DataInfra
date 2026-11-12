@@ -1,0 +1,69 @@
+{
+    "datasets": [
+        {
+            "data_rows": 250,
+            "dataset_name": "ds_alpha",
+            "episode_count": 250,
+            "lerobot_count": 25,
+            "total_duration_s": 19830
+        },
+        {
+            "data_rows": 150,
+            "dataset_name": "ds_beta",
+            "episode_count": 150,
+            "lerobot_count": 15,
+            "total_duration_s": 11880
+        },
+        {
+            "data_rows": 100,
+            "dataset_name": "ds_gamma",
+            "episode_count": 100,
+            "lerobot_count": 10,
+            "total_duration_s": 7930
+        }
+    ],
+    "source_db": "visualize_mock_prod",
+    "distributions": {
+        "has_wrist_cam": [
+            {
+                "rows": 260,
+                "value": false,
+                "sum_duration_s": 20550
+            },
+            {
+                "rows": 240,
+                "value": true,
+                "sum_duration_s": 19090
+            }
+        ],
+        "s_step_a_v_1_c_label": [
+            {
+                "rows": 82,
+                "value": "bad",
+                "sum_duration_s": 6254
+            },
+            {
+                "rows": 74,
+                "value": "good",
+                "sum_duration_s": 5744
+            },
+            {
+                "rows": 88,
+                "value": "mid",
+                "sum_duration_s": 6972
+            },
+            {
+                "rows": 256,
+                "value": null,
+                "sum_duration_s": 20670
+            }
+        ]
+    },
+    "status_statistic": {
+        "s_step_a_v_1": 24,
+        "s_step_a_v_2": 11,
+        "s_step_b_v_1": 10,
+        "download_finish": 50,
+        "register_finish": 46
+    }
+}
