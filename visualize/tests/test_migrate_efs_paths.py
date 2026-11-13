@@ -95,9 +95,19 @@ def test_three_table_update_and_stale_status_rollback(tmp_path):
             candidates = migrate.find_candidates(cur, schema)
         assert candidates == [migrate.Candidate(uuid, str(old), str(new))]
         migrate.verify_candidate(candidates[0])
-        assert migrate.apply_updates(conn, candidates, schema) == {
+        timeouts = []
+
+        def inspect_timeouts(table, count):
+            if table == "status" and count is None:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT current_setting('statement_timeout'), "
+                                "current_setting('lock_timeout')")
+                    timeouts.append(cur.fetchone())
+
+        assert migrate.apply_updates(conn, candidates, schema, progress=inspect_timeouts) == {
             "status": 1, "lerobot_episode": 1, "data": 2,
         }
+        assert timeouts == [("0", "1min")]
         with conn.cursor() as cur:
             for table, n in (("status", 1), ("lerobot_episode", 1), ("data", 2)):
                 cur.execute(f"SELECT lerobot_path FROM {table}")
@@ -146,3 +156,20 @@ def test_convert_path_changes_only_when_it_matches_old_row_path(tmp_path):
                 (4, str(new), str(old)),
                 (5, str(old), str(old)),
             ]
+
+
+def test_disconnected_rollback_does_not_hide_original_error(capsys):
+    class DisconnectedConnection:
+        autocommit = False
+        closed = 1
+
+        def cursor(self):
+            raise psycopg2.OperationalError("original connection failure")
+
+        def rollback(self):
+            raise AssertionError("rollback must not be attempted on a closed connection")
+
+    item = migrate.Candidate(str(uuid4()), "/old", "/new")
+    with pytest.raises(psycopg2.OperationalError, match="original connection failure"):
+        migrate.apply_updates(DisconnectedConnection(), [item])
+    assert "original connection failure" in capsys.readouterr().err

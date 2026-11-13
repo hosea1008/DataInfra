@@ -229,6 +229,7 @@ def apply_updates(
         raise ValueError("apply_updates requires autocommit=False for atomic updates")
     if lock_timeout_seconds < 0:
         raise ValueError("lock_timeout_seconds must be non-negative")
+    stage = "preparing transaction"
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT current_user")
@@ -236,6 +237,7 @@ def apply_updates(
                 raise VerificationError("--apply requires a writer account, not reader")
             cur.execute("SELECT set_config('lock_timeout', %s, true)",
                         (f"{lock_timeout_seconds}s",))
+            cur.execute("SELECT set_config('statement_timeout', '0', true)")
             cur.execute(
                 "CREATE TEMP TABLE efs_path_replacements "
                 "(uuid_text text PRIMARY KEY, old_path text NOT NULL, new_path text NOT NULL) "
@@ -255,6 +257,7 @@ def apply_updates(
 
             status_match = sql.SQL("s.lerobot_uuid = r.uuid_text{}")
             status_cast = sql.SQL("::uuid") if column_types["status"] == "uuid" else sql.SQL("")
+            stage = "locking status rows"
             cur.execute(
                 sql.SQL("SELECT s.lerobot_uuid::text, s.lerobot_path FROM {}.status s "
                         "JOIN efs_path_replacements r ON {} "
@@ -268,6 +271,7 @@ def apply_updates(
 
             changed = {}
             for table in TABLES:
+                stage = f"updating {table}"
                 if progress:
                     progress(table, None)
                 cast = sql.SQL("::uuid") if column_types[table] == "uuid" else sql.SQL("")
@@ -291,10 +295,21 @@ def apply_updates(
                     progress(table, changed[table])
             if changed["status"] != len(candidates):
                 raise VerificationError("status update count mismatch; transaction rolled back")
+        stage = "committing transaction"
         conn.commit()
         return changed
-    except BaseException:
-        conn.rollback()
+    except BaseException as exc:
+        print(f"Migration failed while {stage}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        try:
+            if conn.closed:
+                print("Database connection is closed; PostgreSQL will roll back any open transaction. "
+                      "If failure occurred during commit, check the database before retrying.",
+                      file=sys.stderr)
+            else:
+                conn.rollback()
+        except psycopg2.Error as rollback_exc:
+            print(f"Rollback could not complete: {rollback_exc}. "
+                  "Check the database state before retrying.", file=sys.stderr)
         raise
 
 
@@ -361,7 +376,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         params = connection_params(args.dbinfo)
-        conn = psycopg2.connect(**params)
+        conn = psycopg2.connect(**params, keepalives=1, keepalives_idle=60,
+                                keepalives_interval=30, keepalives_count=10)
         try:
             conn.autocommit = True  # don't hold a DB transaction during filesystem comparison
             if args.diagnose:
